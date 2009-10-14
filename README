@@ -1,0 +1,62 @@
+Link::C - Link C libraries into your Perl 6 program
+Supports most functions of native types (int, char *, etc.)
+No support for structs, but this can be added eventually.
+Only works with Rakudo.
+
+
+USAGE:
+
+use Link::C;
+Link::C::link <library-file header.h>;
+my $result = C::my_function("arguments", 42);
+
+
+OPTIONS:  (give to Link::C::link)
+
+:import($matcher, ...)
+:import($matcher => $subst, ...)
+ - Import functions into global namespace
+	By default functions are put into the C:: namespace.  Using this option
+	will import the functions whose names match $matcher, optionally
+	replacing parts of their name with $subst.  You can include namespace
+	seperators in the string.  This is mainly so you can say:
+	 :import(/^SDL_/ => 'SDL::')
+	or such, and call SDL::Init instead of C::SDL_Init.
+	Using :import(*) will put all functions into the global namespace.
+:verbose
+ - Print status messages to STDERR for the impatient.
+:quiet
+ - Disable non-fatal warnings such as when caching fails.
+:cache  (Default)
+ - Cache the linking code.
+:!cache
+ - Do not cache the linking code.
+
+
+INSTALLATION:
+
+Copy the Link directory to wherever you keep your perl 6 libraries.
+
+
+DEPENDENCIES:
+
+perl >= 5.10
+readelf
+gcc or cpp
+
+
+NOTES:
+
+Eventually, you will simply be able to say:
+ use Link::C <library header.h>;
+instead of:
+ use Link::C;
+ Link::C::link <library header.h>;
+but this is not possible until custom imports are specced and implemented.
+
+Due to Rakudo's speed, the first run-through of your program will take a bit of
+time to generate and compile the linking code.  However, this code will be
+cached at $yourprogram.linkc-cache.pm and $yourprogram.linkc-cache.pir.  Once
+cached there will be minimal overhead.  For even shorter load times, do this:
+ $ perl6 --target=pir Link/C.pm > Link/C.pir
+

@@ -1,0 +1,125 @@
+#!/usr/bin/perl
+use v5.10;
+use strict;
+use warnings;
+package ReadH;
+
+$0 =~ m[ (.*?) / [^/]+ $ ]x or die "Could not find directory of $0\n";
+my $mydir = $1;
+
+undef $!;
+do "$mydir/readh.pg5";  # perl 5 grammar
+$@ and die $@;
+$! and die $!;
+
+my $preprocess = `which gcc` ? 'gcc -E' : `which cpp` ? 'cpp' : die "Cannot find cpp in PATH.\n";
+my $readelf = `which readelf` ? 'readelf -W -s' : die "Cannot find readelf in PATH.\n";
+
+our @header_files;
+our @library_files;
+#our @HEADER_DIRS = ($ENV{CPATH} && (split ':', $ENV{CPATH}), $ENV{C_INCLUDE_PATH} && (split ':', $ENV{C_INCLUDE_PATH}), '/usr/include');
+#our @LIBRARY_DIRS = ($ENV{LIBRARY_PATH} && (split ':', $ENV{LIBRARY_PATH}), '/lib', '/usr/lib');
+
+
+ # Classify arguments into headers and libraries.
+for (@ARGV) {
+	if (/.[hc]$/) {
+		push @header_files, $_
+	}
+	else {
+		push @library_files, $_
+	};
+};
+if (!@header_files) {
+	if (!@library_files) {
+		die "$0: No header or library files specified.\n";
+	};
+	die "$0: No header files specified.\n";
+};
+if (!@library_files) {
+	die "$0: No library files specified.\n";
+};
+
+ # Make each file be a real file.
+#F: for my $f (@header_files) {
+#	if ($f =~ /^\//) {  # Absolute path given
+#		-e $f or die "$0: Header file $f does not exist.\n";
+#	}
+#	else {
+#		D: for my $d (@HEADER_DIRS, @INC) {
+#			if (-e "$d/$f") {
+#				$f = "$d/$f";
+#				next F;
+#			};
+#		}  # none found
+#		die "$0: $f not found in " . (join ', ', @HEADER_DIRS) . " or \@INC.\n";
+#	};
+#};
+#F: for my $f (@library_files) {
+#	if ($f =~ /^\//) {  # Absolute path; will not attch .so on the end.
+#		-e $f or die "$0: Library file $f does not exist.\n";
+#	}
+#	else {
+#		D: for my $d (@LIBRARY_DIRS, @INC) {
+#			E: for my $ext ("", qw(.so .so.0)) {
+#				if (-e "$d/$f$ext") {
+#					$f = "$d/$f$ext";
+#					next F;
+#				};
+#			};
+#		}  # none found
+#		die "$0: None of $f, $f.so, or $f.so.0 found in any of " . (join ', ', @LIBRARY_DIRS) . " or \@INC.\n";
+#	};
+#};
+
+ # Get linkable symbols from libraries.
+ # symbol_name => library_file
+ # The format readelf return is " no: position size type bind vis ndx name "
+our %library_symbols = map {
+	my $lib = $_;
+	my @sections = map [split /\s+/, $_], qx"$readelf $lib";
+	@sections = grep {defined $_->[4] and $_->[4] eq 'FUNC' && $_->[3] != 0} @sections;
+	map { $_->[8] =~ /^(\w+)/ and $1 => $lib } @sections;
+} @library_files;
+
+ # Get preprocess header files.
+our $processed_headers = join '', map {
+	my $header = $_;
+	$header =~ s/'/'\\''/g;  # shell safety
+	readpipe "$preprocess '$header'";
+} @header_files;
+
+ # Run parser on headers.
+ # The parse will (eventually) put things in:
+ #   @typedef_decls
+ #   @struct_decls
+ #   @union_decls
+ #   @function_decls
+ #   @data_decls
+ #   @native_types -- Is a predefined list of possible native types.
+ #   @typedefs  -- Does not include anonymous structs or unions.  Can recurse.
+ #   @structs   -- Includes anonymous structs.  It is our job to give names to anonymous structs.
+ #   @unions    -- Includes anonymous unions.  It is our job to give names to anonymous unions.
+ #   @functions -- It is our job to resolve all the types to structs, unions, or natives.
+ #   @variables -- It is our job to resolve the type.
+
+run_grammar($processed_headers);
+
+sub resolve_type {
+	our %typedefs;
+	exists $typedefs{$_[0]}
+		? resolve_type($typedefs{$_[0]})
+		: $_[0];
+}
+
+#say for keys %library_symbols;
+#say "F";
+our @functions;
+ # Print in a format that can be read quickly by Rakudo
+for (grep {$_->{name} ~~ @{[keys %library_symbols]}} @functions) {
+	say join " : ",
+	 $library_symbols{$_->{name}},
+	 $_->{name},
+	 resolve_type($_->{returns}),
+	 map resolve_type($_), @{$_->{arguments}};
+};

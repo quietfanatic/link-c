@@ -1,0 +1,215 @@
+#!/usr/bin/perl
+use v5.10;
+use strict 'subs';
+use warnings;
+use re 'eval';
+
+package ReadH;
+
+sub test_re;
+
+$| = 1;
+
+$comment    = qr/ (?> \/\* .*? \*\/            ) /sx;
+$ppmessage  = qr/ (?> ^ \# .*? \R              ) /mx;
+$string     = qr/ (?> \" (?: \\\" | [^"] )* \" ) /sx;
+$identifier = qr/ (?> [a-zA-Z_] \w*            ) /sx;
+test_re $identifier, 'uint';
+
+$s = qr/ (?>
+	  (?: $comment | \s )+
+	| (?<=\W)
+	| (?=\W)
+	| ^
+	| $
+) /sx;
+
+### Things we don't want but have to watch out for
+$uninteresting = qr/ (?>
+	  $comment
+	| $ppmessage
+	| $string
+) /sx;
+
+$curly_block = qr/ (?>
+	\{ (?:
+		  (??{$curly_block})
+		| $uninteresting
+		| [^{}]
+	)* \}
+) /sx;
+
+### DATA DECLARATIONS
+
+$basic_type = qr/ (?>
+	(?: (?: signed | unsigned ) $s )? (?:
+		  void
+		| char
+		| short $s int
+		| short
+		| int
+		| long $s long $s int
+		| long $s long
+		| long $s int
+		| long $s double
+		| long
+		| float
+		| double
+		| __Bool
+		| __Complex
+		| __Imaginary
+	)
+	| signed | unsigned
+) /sx;
+test_re $basic_type, 'unsigned int';
+test_re $basic_type, 'signed long long int';
+test_re $basic_type, 'int';
+
+
+$type_extra = qr/ (?>
+	const | restrict | volatile | __const | __restrict | __volatile | __extension__
+) /sx;
+
+$typedeffed_type = qr/ (?>
+	($identifier) (?(?{$^N ~~ @typedef_names})|(*FAIL))
+) /sx;
+
+$type = qr/ (?>
+	(?: $type_extra $s )*
+	( (?:
+		  $basic_type
+		| (??{$struct_type})
+		| (??{$union_type})
+		| $typedeffed_type
+	) (?: $s \* )* )
+	(?: $s $type_extra )*
+) /sx;
+test_re $type, 'int';
+test_re $type, 'unsigned int';
+test_re $type, 'char *';
+
+$decl_name = qr/ (?>
+	$identifier $s
+	(?: \[ [^\]]* \] )?
+) /sx;
+
+$data_extra = qr/ (?>
+	extern | static | auto | register | __extension__
+) /sx;
+
+$data = qr/ (?>
+	(?: $data_extra $s )? $type $s $decl_name $s (?: , $s $decl_name $s )*
+) /sx;
+
+$data_decl = qr/ (?>
+	$data $s
+	\;
+) /sx;
+
+### STRUCT DECLARATIONS
+
+$struct_body = qr/ (?>
+	$curly_block
+) /sx;
+
+$struct_type = qr/ (?>
+	  struct (?: $s $identifier)? $s $struct_body
+	| struct $s $identifier
+) /sx;
+
+$union_type = qr/ (?>
+      union (?: $s $identifier)? $s $struct_body
+	| union $s $identifier
+) /sx;
+
+$struct_decl = qr/ (?>
+	struct $s $identifier $s $struct_body $s \;
+) /sx;
+
+$union_decl = qr/ (?>
+	struct $s $identifier $s $struct_body $s \;
+) /sx;
+
+### TYPEDEF DECLARATIONS
+
+$typedef_decl = qr/ (?>
+	                      (?{ $typedef = {} })
+	(?: $data_extra $s )?
+	typedef $s
+	$type $s              (?{ $typedef{type} = ($^N.substr(0,6) eq 'struct') ? "!struct" : $^N })
+	($identifier) $s      (?{ $typedef{name} = $^N; push @typedef_names, $^N })
+	\;
+) /sx;
+
+test_re $typedef_decl, 'typedef unsigned int uint;';
+
+### FUNCTION DECLARATIONS
+
+$function_body = qr/ (?>
+	$curly_block
+) /sx;
+
+$signature_item = qr/ (?>
+	$type                  (?{ push @{$arguments}, $^N })
+	(?: $s ($decl_name) )?
+) /sx;
+
+$signature = qr/ (?>
+                           (?{ $arguments = [] })
+	\( $s (?:
+		  void
+		| (?: $signature_item ) (?: $s , (?: $s $signature_item | \.\.\. ) )*
+	)? $s \)
+) /sx;
+
+$parens = qr/ (?>
+	\( (?:
+		(??{$parens}) | [^)]
+	)*? \)
+) /sx;
+test_re $parens, '(1, 2)';
+
+$function_extra = qr/ (?>
+	__\w+ | \(\( (?: $parens | . )*? \)\)
+) /sx;
+
+$function_decl = qr/ (?>
+	(?: $data_extra $s )* (?{ $function = {} })
+	$type $s              (?{ $function->{returns} = $^N })
+	($identifier) $s      (?{ $function->{name} = $^N; })
+	$signature $s         (?{ $function->{arguments} = $arguments })
+	(?: $function_extra $s )*
+	(?: $function_body | \; )
+) /sx;
+test_re $signature, '(__const char *__key, __const char *__salt)';
+test_re qr/^(?: $function_extra $s )*$/x, '__attribute__ ((__nothrow__)) __attribute__ ((__nonnull__ (1, 2)))';
+test_re $function_decl, 'extern char *crypt (__const char *__key, __const char *__salt)
+     __attribute__ ((__nothrow__)) __attribute__ ((__nonnull__ (1, 2)));';
+
+### Things we want
+$interesting = qr/ (?>
+	  ( $typedef_decl )   (?{ push @typedef_decls, $^N; push @typedefs, $typedef{name}, $typedef{type} })
+	| ( $struct_decl )    (?{ push @struct_decls, $^N })
+	| ( $union_decl )     (?{ push @union_decls, $^N })
+	| ( $function_decl )  (?{ push @function_decls, $^N; push @functions, $function })
+	| ( $data_decl )      (?{ push @data_decls, $^N })
+) /sx;
+
+
+sub run_grammar($) {
+	1 while $_[0] =~ /$interesting|$uninteresting/g;
+	our %typedefs = @typedefs;
+};
+
+
+
+
+sub test_re {
+	my ($rulename, $test) = @_;
+	die "$rulename did not parse \"$test\"\n" unless $test =~ /$rulename/
+};
+$test_re_test_re = qr/ abc /sx;
+test_re $test_re_test_re, 'abc';
+
+
+
