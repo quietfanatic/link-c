@@ -7,7 +7,8 @@ constant @LIBRARY_DIRS = <. /lib /usr/lib>, @*INC;
 constant @LIBRARY_EXTS = '', <.so .so.0>;
 
 sub link(*@files is copy, :$import?, :$verbose?, :$quiet?, :$cache = 1, :$link = *, :$skip?) {
-	our $already_called and die "Multiple calls to Link::C are not supported at this time, sorry.\nPlease put all your arguments in one call.\n";
+	state $already_called;
+	$already_called and die "Multiple calls to Link::C are not supported at this time, sorry.\nPlease put all your arguments in one call.\n";
 	$already_called = 1;
 	 # make each argument point to a real file
 	for @files {
@@ -120,7 +121,7 @@ sub readh(*@files is copy, :$link, :$skip) {
 	unlink $tmperr;
 	die $err if $err;
 	my @skip = $skip ~~ Array ?? @($skip) !! $skip;
-	my @link = $link ~~ Array ?? @($link) !! $skip;
+	my @link = $link ~~ Array ?? @($link) !! $link;
 	for $result.split("\n")  {
 		next when "";
 		my @r = .split(' : ');
