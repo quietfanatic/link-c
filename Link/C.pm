@@ -27,7 +27,7 @@ sub link(*@files is copy, :$import?, :$verbose?, :$quiet?, :$cache = 1, :$link =
 	};
 	my $linking_code;
 	 # If there's a cache use it
-	if $cache and check_newer("$caller.linkc-cache.pm", $caller, @files) {
+	if $cache and $cache eq 'always' or check_newer("$caller.linkc-cache.pm", $caller, @files) {
 		 warn "Using cache" if $verbose;
 		 # using 'use' picks the .pir file before the .pm file
 		 # but if the .pir file does not exist we won't know.

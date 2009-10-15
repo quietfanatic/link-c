@@ -15,7 +15,7 @@ OPTIONS:  (give to Link::C::link)
 
 :link($match, ...)  (Default: *)
  - Link only functions whose names match $match.
-	Useful if you're interested in only a small subset of a large library
+    Useful if you're interested in only a small subset of a large library
 	that would take a long time to process.
 :skip($match, ...)
  - Do not link functions whose names match $match.
@@ -23,13 +23,13 @@ OPTIONS:  (give to Link::C::link)
 :import($match, ...)
 :import($match => $subst, ...)
  - Import functions into global namespace
-	By default functions are put into the C:: namespace.  Using this option
-	will import the functions whose names match $match, optionally
-	replacing those parts of their name with $subst.  You can include
-	namespace seperators in the string.  This is mainly so you can say:
-	 :import(/^SDL_/ => 'SDL::')
-	or such, and call SDL::Init instead of C::SDL_Init.
-	Using :import(*) will put all functions into the global namespace.
+    By default functions are put into the C:: namespace.  Using this option
+    will import the functions whose names match $match, optionally replacing
+    those parts of their name with $subst.  You can include namespace
+    seperators in the string.  This is mainly so you can say:
+     :import(/^SDL_/ => 'SDL::')
+    or such, and call SDL::Init instead of C::SDL_Init.
+    Using :import(*) will put all functions into the global namespace.
 :verbose
  - Print status messages to STDERR for the impatient.
 :quiet
@@ -38,7 +38,11 @@ OPTIONS:  (give to Link::C::link)
  - Cache the linking code.
 :!cache
  - Do not cache the linking code.
-
+:cache<always>
+ - Use cache even if old.
+    Use this if you don't want Link::C to regenerate the linking code every
+    time your program is modified.  To force regeneration, delete both cache
+    files manually or remove this option.
 
 INSTALLATION:
 
