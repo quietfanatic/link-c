@@ -295,7 +295,6 @@ constant $TOP_DECL =
 Q/Q:PIR {
 	.local pmc lib
 	.local pmc func
-	.local pmc f
 	.local string failstr
 	goto begin
 	error:
@@ -320,11 +319,9 @@ Q/Q:PIR {
 /;
 
 constant $LINK_FUNCTION =
-Q/$Link::C::NCI::[[NAME]] = undef;
-Q:PIR {
+Q/Q:PIR {
 	func = dlfunc lib, '[[NAME]]', '[[PARROT_SIG]]'
-	f = get_hll_global ['Link';'C';'NCI'], '$[[NAME]]'
-	f.'!STORE'(func)
+	set_hll_global ['Link';'C';'NCI'], '$[[NAME]]', func
 };
 &C::[[NAME]] = sub [[NAME]] ([[ARGS]]) { $Link::C::NCI::[[NAME]]([[ARGS]]) }
 /;
