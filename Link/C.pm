@@ -6,7 +6,7 @@ constant @HEADER_DIRS = <. /usr/include>, @*INC;
 constant @LIBRARY_DIRS = <. /lib /usr/lib>, @*INC;
 constant @LIBRARY_EXTS = '', <.so .so.0>;
 
-sub link(*@files is copy, :$import?, :$verbose?, :$quiet?, :$cache = 1) {
+sub link(*@files is copy, :$import?, :$verbose?, :$quiet?, :$cache = 1, :$link = *, :$skip?) {
 	our $already_called and die "Multiple calls to Link::C are not supported at this time, sorry.\nPlease put all your arguments in one call.\n";
 	$already_called = 1;
 	 # make each argument point to a real file
@@ -36,7 +36,7 @@ sub link(*@files is copy, :$import?, :$verbose?, :$quiet?, :$cache = 1) {
 		 warn "Not using cache" if $verbose;
 		 warn "Reading headers and libraries" if $verbose;
 		 # readh runs Link/C/readh.p5 and sets %functions
-		readh(@files);
+		readh(@files, :$link, :$skip);
 		 warn "Generating code" if $verbose;
 		 # this generates the linking code based on %functions
 		$linking_code = gen_linking_code(:$import);
@@ -107,7 +107,7 @@ sub resolve_library($f is rw) {
 	  ~ "\n";
 }
 
-sub readh(*@files is copy) {
+sub readh(*@files is copy, :$link, :$skip) {
 	my $readh = join "/", ((@*INC, "..").first({"$_/Link/C/readh.p5" ~~ :e}), "Link/C/readh.p5");
 	our %functions;
 	for @files {
@@ -119,10 +119,15 @@ sub readh(*@files is copy) {
 	my $err = slurp $tmperr;
 	unlink $tmperr;
 	die $err if $err;
+	my @skip = $skip ~~ Array ?? @($skip) !! $skip;
+	my @link = $link ~~ Array ?? @($link) !! $skip;
 	for $result.split("\n")  {
 		next when "";
 		my @r = .split(' : ');
-		push (%functions{shift @r} //= []), [@r];
+		next if @r[1] ~~ any(@skip)
+		if @r[1] ~~ any(@link) {
+			push (%functions{shift @r} //= []), [@r];
+		}
 	}
 }
 

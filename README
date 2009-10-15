@@ -7,19 +7,26 @@ Only works with Rakudo.
 USAGE:
 
 use Link::C;
-Link::C::link <library-file header.h>;
+Link::C::link <library_file header.h>;
 my $result = C::my_function("arguments", 42);
 
 
 OPTIONS:  (give to Link::C::link)
 
-:import($matcher, ...)
-:import($matcher => $subst, ...)
+:link($match, ...)  (Default: *)
+ - Link only functions whose names match $match.
+	Useful if you're interested in only a small subset of a large library
+	that would take a long time to process.
+:skip($match, ...)
+ - Do not link functions whose names match $match.
+    This overrides :link.
+:import($match, ...)
+:import($match => $subst, ...)
  - Import functions into global namespace
 	By default functions are put into the C:: namespace.  Using this option
-	will import the functions whose names match $matcher, optionally
-	replacing parts of their name with $subst.  You can include namespace
-	seperators in the string.  This is mainly so you can say:
+	will import the functions whose names match $match, optionally
+	replacing those parts of their name with $subst.  You can include
+	namespace seperators in the string.  This is mainly so you can say:
 	 :import(/^SDL_/ => 'SDL::')
 	or such, and call SDL::Init instead of C::SDL_Init.
 	Using :import(*) will put all functions into the global namespace.
@@ -27,7 +34,7 @@ OPTIONS:  (give to Link::C::link)
  - Print status messages to STDERR for the impatient.
 :quiet
  - Disable non-fatal warnings such as when caching fails.
-:cache  (Default)
+:cache  (Default: True)
  - Cache the linking code.
 :!cache
  - Do not cache the linking code.
@@ -60,3 +67,9 @@ cached at $yourprogram.linkc-cache.pm and $yourprogram.linkc-cache.pir.  Once
 cached there will be minimal overhead.  For even shorter load times, do this:
  $ perl6 --target=pir Link/C.pm > Link/C.pir
 
+Right now, Link::C::link can only be called once, because the cache would get
+overwritten.  However, you can give all your libraries and headers to Link::C
+at once, and it will automatically link each function to the right library.
+This will probably be faster than doing it in multiple passes anyway.
+
+Link::C assumes your library files are in ELF format.
