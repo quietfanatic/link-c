@@ -207,6 +207,7 @@ sub repl (Str $s, *@pairs) {
  # Parrot's NCI interface does not make a case for unsigned integers.
 constant %PARROT_SIG_TRANS = (
 	'void'             => 'v',
+	'void *'           => 'i',  # Yes we'll keep track.
 	'char'             => 'c',
 	'char *'           => 't',  # This is presumed to be a string.
 	'signed char'      => 'c',
