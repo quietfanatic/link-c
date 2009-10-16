@@ -109,7 +109,13 @@ sub resolve_type {
 	our %typedefs;
 	exists $typedefs{$_[0]}
 		? resolve_type($typedefs{$_[0]})
-		: $_[0];
+		: regularize_type($_[0]);
+}
+
+sub regularize_type {
+	our $s;  # from readh.pg5
+	my @segments = split /$s/, $_[0];
+	return join ' ', @segments;
 }
 
 #say for keys %library_symbols;
@@ -117,9 +123,12 @@ sub resolve_type {
 our @functions;
  # Print in a format that can be read quickly by Rakudo
 for (grep {$_->{name} ~~ @{[keys %library_symbols]}} @functions) {
+	my $rt = resolve_type($_->{returns});
+	my @at = map resolve_type($_), @{$_->{arguments}};
+	next if grep /^struct/, $rt, @at;
 	say join " : ",
 	 $library_symbols{$_->{name}},
 	 $_->{name},
-	 resolve_type($_->{returns}),
-	 map resolve_type($_), @{$_->{arguments}};
+	 $rt,
+	 @at
 };
