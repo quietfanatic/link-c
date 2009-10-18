@@ -2,21 +2,27 @@
 ### Link::C will automatically link your C libraries for you.
 use v6;
 module Link::C;
+
 constant @HEADER_DIRS = <. /usr/include>, @*INC;
 constant @LIBRARY_DIRS = <. /lib /usr/lib>, @*INC;
 constant @LIBRARY_EXTS = '', <.so .so.0>;
 
-sub link(*@files is copy, :$import?, :$verbose?, :$quiet?, :$cache = 1, :$link = *, :$skip?) {
-	state $already_called;
-	$already_called and die "Multiple calls to Link::C are not supported at this time, sorry.\nPlease put all your arguments in one call.\n";
-	$already_called = 1;
-	 # make each argument point to a real file
+sub link(
+		*@files is copy,
+		:$verbose?,
+		:$quiet?,
+		:$cache = 1,
+		:$link = *,
+		:$import?,
+		:$skip?,
+) {
+	call_only_once;
 	for @files {
-		when / \.<[hc]> $ / {
-			resolve_header($_);
+		if $_ ~~ /\.<[hc]>$/ {
+			resolve_header($_)
 		}
-		when * {
-			resolve_library($_);
+		else {
+			resolve_library($_)
 		}
 	}
 	 # Find the filename of the calling program, for caching
@@ -26,62 +32,31 @@ sub link(*@files is copy, :$import?, :$verbose?, :$quiet?, :$cache = 1, :$link =
 		%r = $P0['file']
 	};
 	my $linking_code;
-	 # If there's a cache use it
+	 # using 'use' picks the .pir file before the .pm file
+	 # but if the .pir file does not exist we won't know.
 	if $cache and $cache eq 'always' or check_newer("$caller.linkc-cache.pm", $caller, @files) {
-		 warn "Using cache" if $verbose;
-		 # using 'use' picks the .pir file before the .pm file
-		 # but if the .pir file does not exist we won't know.
+		  warn "Using cache" if $verbose;
 		$linking_code = "use \"$caller.linkc-cache\"";
 	}
 	else {
-		 warn "Not using cache" if $verbose;
-		 warn "Reading headers and libraries" if $verbose;
-		 # readh runs Link/C/readh.p5 and sets %functions
+		  warn "Not using cache" if $verbose;
+		  warn "Reading headers and libraries" if $verbose;
 		readh(@files, :$link, :$skip);
-		 warn "Generating code" if $verbose;
-		 # this generates the linking code based on %functions
+		  warn "Generating code" if $verbose;
 		$linking_code = gen_linking_code(:$import);
-		if $cache {
-			 warn "Creating cache" if $verbose;
-			if my $CACHE = open "$caller.linkc-cache.pm", :w {
-				$CACHE.print($linking_code) or $quiet or warn "Could not write to cache: $!\n";
-				$CACHE.close or $quiet or warn "Could not close cache: $!\n";
-				 warn "Precompiling cache" if $verbose;
-				my $tmperr = '/tmp/linkc-compile-err-' ~ [~] ('a'..'z', 'A'..'Z', 0..9).pick(5, :replace);
-				run("perl6 --target=pir $caller.linkc-cache.pm > $caller.linkc-cache.pir 2> $tmperr");
-				if (slurp $tmperr) -> $err {
-					warn "Could not precompile cache: $err\n" unless $quiet;
-				}
-				else {
-					$linking_code = "use \"$caller.linkc-cache\"";
-				}
-				unlink $tmperr or warn "Could not unlink $tmperr: $!\n";
-			}
-			else {
-				warn "Could not open $caller.linkc-cache.pm for writing: $!\nWill not cache linking code.\n" unless $quiet;
-			}
-		}
+		if $cache { write_cache($caller, $linking_code, :$verbose, :$quiet) };
 	}
-	 warn "Linking" if $verbose;
+	  warn "Linking" if $verbose;
 	undefine $!;
 	eval $linking_code;
 	die $! if $!;
-	 warn "Done" if $verbose;
+	  warn "Done" if $verbose;
 }
 
-sub check_newer($file is copy, *@others is copy) {
-	return 0 unless $file ~~ :e;
-	$file.=subst("'", "'\\''", :global);  # shell safety
-	@others.map: *.=subst("'", "'\\''", :global);
-	my $modtime = 'stat -c %Y';
-	my $filemodtime = qqx"$modtime '$file'";
-	for @others {
-		my $othermodtime = qqx"$modtime '$_'";
-		if $othermodtime > $filemodtime {
-			return 0;
-		}
-	}
-	return 1;
+sub call_only_once {
+	state $already_called;
+	$already_called and die "Multiple calls to Link::C are not supported at this time, sorry.\nPlease put all your arguments in one call.\n";
+	$already_called = 1;
 }
 
 sub resolve_header($f is rw) {
@@ -108,6 +83,40 @@ sub resolve_library($f is rw) {
 	  ~ "\n";
 }
 
+sub check_newer($file is copy, *@others is copy) {
+	return False unless $file ~~ :e;
+	$file.=subst("'", "'\\''", :global);  # shell safety
+	@others.map: *.=subst("'", "'\\''", :global);
+	my $modtime = 'stat -c %Y';  # :M doesn't work
+	my $filemodtime = qqx"$modtime '$file'";
+	for @others {
+		return False if qqx"$modtime '$_'" > $filemodtime;
+	}
+	return True;
+}
+
+sub write_cache($caller, $linking_code is rw, :$verbose, :$quiet) {
+	  warn "Creating cache" if $verbose;
+	if my $CACHE = open "$caller.linkc-cache.pm", :w {
+		$CACHE.print($linking_code) or $quiet or warn "Could not write to cache: $!\n";
+		$CACHE.close or $quiet or warn "Could not close cache: $!\n";
+		  warn "Precompiling cache" if $verbose;
+		my $tmperr = '/tmp/linkc-compile-err-' ~ [~] ('a'..'z', 'A'..'Z', 0..9).pick(5, :replace);
+		run("perl6 --target=pir $caller.linkc-cache.pm > $caller.linkc-cache.pir 2> $tmperr");
+		if (slurp $tmperr) -> $err {
+			warn "Could not precompile cache: $err\n" unless $quiet;
+		}
+		else {
+			$linking_code = "use \"$caller.linkc-cache\"";
+		}
+		unlink $tmperr or $quiet or warn "Could not unlink $tmperr: $!\n";
+	}
+	else {
+		warn "Could not open $caller.linkc-cache.pm for writing: $!\nWill not cache linking code.\n" unless $quiet;
+	}
+}
+
+
 sub readh(*@files is copy, :$link, :$skip) {
 	my $readh = join "/", ((@*INC, "..").first({"$_/Link/C/readh.p5" ~~ :e}), "Link/C/readh.p5");
 	our %functions;
@@ -120,12 +129,14 @@ sub readh(*@files is copy, :$link, :$skip) {
 	my $err = slurp $tmperr;
 	unlink $tmperr;
 	die $err if $err;
-	my @skip = $skip ~~ Array ?? @($skip) !! $skip;
-	my @link = $link ~~ Array ?? @($link) !! $link;
+
+	my @skip = $skip ~~ List ?? @($skip) !! $skip;
+	my @link = $link ~~ List ?? @($link) !! $link;
+
 	for $result.split("\n")  {
 		next when "";
 		my @r = .split(' : ');
-		next if @r[1] ~~ any(@skip)
+		next if @r[1] ~~ any(@skip);
 		if @r[1] ~~ any(@link) {
 			push (%functions{shift @r} //= []), [@r];
 		}
@@ -202,6 +213,7 @@ sub repl (Str $s, *@pairs) {
 	}
 	$r;
 }
+
 
  # Maybe we should regularize the types some.
  # Parrot's NCI interface does not make a case for unsigned integers.
