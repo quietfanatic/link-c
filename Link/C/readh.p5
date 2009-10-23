@@ -38,38 +38,6 @@ if (!@library_files) {
 	die "$0: No library files specified.\n";
 };
 
- # Make each file be a real file.
-#F: for my $f (@header_files) {
-#	if ($f =~ /^\//) {  # Absolute path given
-#		-e $f or die "$0: Header file $f does not exist.\n";
-#	}
-#	else {
-#		D: for my $d (@HEADER_DIRS, @INC) {
-#			if (-e "$d/$f") {
-#				$f = "$d/$f";
-#				next F;
-#			};
-#		}  # none found
-#		die "$0: $f not found in " . (join ', ', @HEADER_DIRS) . " or \@INC.\n";
-#	};
-#};
-#F: for my $f (@library_files) {
-#	if ($f =~ /^\//) {  # Absolute path; will not attch .so on the end.
-#		-e $f or die "$0: Library file $f does not exist.\n";
-#	}
-#	else {
-#		D: for my $d (@LIBRARY_DIRS, @INC) {
-#			E: for my $ext ("", qw(.so .so.0)) {
-#				if (-e "$d/$f$ext") {
-#					$f = "$d/$f$ext";
-#					next F;
-#				};
-#			};
-#		}  # none found
-#		die "$0: None of $f, $f.so, or $f.so.0 found in any of " . (join ', ', @LIBRARY_DIRS) . " or \@INC.\n";
-#	};
-#};
-
  # Get linkable symbols from libraries.
  # symbol_name => library_file
  # The format readelf return is " no: position size type bind vis ndx name "
@@ -88,18 +56,12 @@ our $processed_headers = join '', map {
 } @header_files;
 
  # Run parser on headers.
- # The parse will (eventually) put things in:
- #   @typedef_decls
- #   @struct_decls
- #   @union_decls
- #   @function_decls
- #   @data_decls
- #   @native_types -- Is a predefined list of possible native types.
- #   @typedefs  -- Does not include anonymous structs or unions.  Can recurse.
- #   @structs   -- Includes anonymous structs.  It is our job to give names to anonymous structs.
- #   @unions    -- Includes anonymous unions.  It is our job to give names to anonymous unions.
- #   @functions -- It is our job to resolve all the types to structs, unions, or natives.
- #   @variables -- It is our job to resolve the type.
+ # The parse will put things in:
+ # %typedefs
+ # %variables
+ # %functions
+ # %structs
+ # %unions
 
 run_grammar($processed_headers);
 
@@ -116,17 +78,10 @@ sub resolve_type {
 	}
 }
 
-sub regularize_type {
-	our $s;  # from readh.pg5
-	my @segments = split /$s/, $_[0];
-	return join ' ', @segments;
-}
 
-#say for keys %library_symbols;
-#say "F";
 our %functions;
 our %typedefs;
-say for keys %typedefs;
+
  # Print in a format that can be read quickly by Rakudo
 for (grep {$functions{$_}{ident} ~~ @{[keys %library_symbols]}} keys %functions) {
 	my $rt = resolve_type($functions{$_}{ret});
