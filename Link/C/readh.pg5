@@ -6,210 +6,531 @@ use re 'eval';
 
 package ReadH;
 
-sub test_re;
-
-$| = 1;
-
-$comment    = qr/ (?> \/\* .*? \*\/            ) /sx;
-$ppmessage  = qr/ (?> ^ \# .*? \R              ) /mx;
-$string     = qr/ (?> \" (?: \\\" | [^"] )* \" ) /sx;
-$identifier = qr/ (?> [a-zA-Z_] \w*            ) /sx;
-test_re $identifier, 'uint';
-
-$s = qr/ (?>
-	  (?: $comment | \s )+
-	| (?<=\W)
-	| (?=\W)
-	| ^
-	| $
-) /sx;
-
-### Things we don't want but have to watch out for
-$uninteresting = qr/ (?>
-	  $comment
-	| $ppmessage
-	| $string
-) /sx;
-
-$curly_block = qr/ (?>
-	\{ (?:
-		  (??{$curly_block})
-		| $uninteresting
-		| [^{}]
-	)* \}
-) /sx;
-
-### DATA DECLARATIONS
-
-$basic_type = qr/ (?>
-	(?: (?: signed | unsigned ) $s )? (?:
-		  void
-		| char
-		| short $s int
-		| short
-		| int
-		| long $s long $s int
-		| long $s long
-		| long $s int
-		| long $s double
-		| long
-		| float
-		| double
-		| __Bool
-		| __Complex
-		| __Imaginary
-	)
-	| signed | unsigned
-) /sx;
-test_re $basic_type, 'unsigned int';
-test_re $basic_type, 'signed long long int';
-test_re $basic_type, 'int';
+$DEBUG = 0;
 
 
-$type_extra = qr/ (?>
-	const | restrict | volatile | __const | __restrict | __volatile | __extension__
-) /sx;
-
-$typedeffed_type = qr/ (?>
-	($identifier) (?(?{$^N ~~ @typedef_names})|(*FAIL))
-) /sx;
-
-$type = qr/ (?>
-	(?: $type_extra $s )*
-	( (?:
-		  $basic_type
-		| (??{$struct_type})
-		| (??{$union_type})
-		| $typedeffed_type
-	) (?: $s \* )* )
-	(?: $s $type_extra )*
-) /sx;
-test_re $type, 'int';
-test_re $type, 'unsigned int';
-test_re $type, 'char *';
-
-$decl_name = qr/ (?>
-	$identifier $s
-	(?: \[ [^\]]* \] )?
-) /sx;
-
-$data_extra = qr/ (?>
-	extern | static | auto | register | __extension__
-) /sx;
-
-$data = qr/ (?>
-	(?: $data_extra $s )? $type $s $decl_name $s (?: , $s $decl_name $s )*
-) /sx;
-
-$data_decl = qr/ (?>
-	$data $s
-	\;
-) /sx;
-
-### STRUCT DECLARATIONS
-
-$struct_body = qr/ (?>
-	$curly_block
-) /sx;
-
-$struct_type = qr/ (?>
-	  struct (?: $s $identifier)? $s $struct_body
-	| struct $s $identifier
-) /sx;
-
-$union_type = qr/ (?>
-      union (?: $s $identifier)? $s $struct_body
-	| union $s $identifier
-) /sx;
-
-$struct_decl = qr/ (?>
-	struct $s $identifier $s $struct_body $s \;
-) /sx;
-
-$union_decl = qr/ (?>
-	struct $s $identifier $s $struct_body $s \;
-) /sx;
-
-### TYPEDEF DECLARATIONS
-
-$typedef_decl = qr/ (?>
-	                      (?{ $typedef = {} })
-	(?: $data_extra $s )?
-	typedef $s
-	$type $s              (?{ $typedef{type} = ($^N.substr(0,6) eq 'struct') ? "!struct" : $^N })
-	($identifier) $s      (?{ $typedef{name} = $^N; push @typedef_names, $^N })
-	\;
-) /sx;
-
-test_re $typedef_decl, 'typedef unsigned int uint;';
-
-### FUNCTION DECLARATIONS
-
-$function_body = qr/ (?>
-	$curly_block
-) /sx;
-
-$signature_item = qr/ (?>
-	$type                  (?{ push @{$arguments}, $^N })
-	(?: $s ($decl_name) )?
-) /sx;
-
-$signature = qr/ (?>
-                           (?{ $arguments = [] })
-	\( $s (?:
-		  void
-		| (?: $signature_item ) (?: $s , (?: $s $signature_item | \.\.\. ) )*
-	)? $s \)
-) /sx;
-
-$parens = qr/ (?>
-	\( (?:
-		(??{$parens}) | [^)]
-	)*? \)
-) /sx;
-test_re $parens, '(1, 2)';
-
-$function_extra = qr/ (?>
-	__\w+ | \(\( (?: $parens | . )*? \)\)
-) /sx;
-
-$function_decl = qr/ (?>
-	(?: $data_extra $s )* (?{ $function = {} })
-	$type $s              (?{ $function->{returns} = $^N })
-	($identifier) $s      (?{ $function->{name} = $^N; })
-	$signature $s         (?{ $function->{arguments} = $arguments })
-	(?: $function_extra $s )*
-	(?: $function_body | \; )
-) /sx;
-test_re $signature, '(__const char *__key, __const char *__salt)';
-test_re qr/^(?: $function_extra $s )*$/x, '__attribute__ ((__nothrow__)) __attribute__ ((__nonnull__ (1, 2)))';
-test_re $function_decl, 'extern char *crypt (__const char *__key, __const char *__salt)
-     __attribute__ ((__nothrow__)) __attribute__ ((__nonnull__ (1, 2)));';
-
-### Things we want
-$interesting = qr/ (?>
-	  ( $typedef_decl )   (?{ push @typedef_decls, $^N; push @typedefs, $typedef{name}, $typedef{type} })
-	| ( $struct_decl )    (?{ push @struct_decls, $^N })
-	| ( $union_decl )     (?{ push @union_decls, $^N })
-	| ( $function_decl )  (?{ push @function_decls, $^N; push @functions, $function })
-	| ( $data_decl )      (?{ push @data_decls, $^N })
-) /sx;
-
+ # Parse data should end up in these:
+our %structs;  # ident => [ {type, ident, array} ]
+our %unions;  # same as above
+our %variables;  # ident => {type, ident, array}
+our %typedefs;  # ident => type
+our %needs_eval;  # strings that need evaluation, for finding the size of arrays.
+our %functions;  # ident => {ret, args => [ type ]}
 
 sub run_grammar($) {
-	1 while $_[0] =~ /$interesting|$uninteresting/g;
-	our %typedefs = @typedefs;
+	1 while $_[0] =~ /
+		(?: (?&interesting) | (?&uninteresting) )
+		$grammar
+	/gsx;
+	 # Eval @needs_eval expressions
+}
+
+
+
+
+
+####
+#
+# The conventions used here may be confusing so I shall explain them here.
+#
+# The following variables will be used in rules:
+#  $m:    data mined in the current rule; usually a hash but can be anything.
+#  @oldm: stack of current matches.
+#  $r:    returns the data mined in the rule; must be written to only at the
+#         end of the rule to avoid overwriting it in nested rules.
+#
+# This format will be used for all data-capturing rules:
+#  (?<rule> (?> $INIT_STR (?:  # or INIT_HASH etc.
+#      some regex stuff
+#      (?&nested_rule) (?{$m = $r->{data}})  # or similar
+#  ) $SUCCEED | $FAIL ))
+#
+# These special variables are for controlling the @oldm stack.
+#
+# I'd use Regexp::Grammar, but I already have this and it works.
+#
+####
+
+#####  TABLE OF CONTENTS
+#
+### UNINTERESTING
+#
+# comment
+# ppmessage
+# string
+# uninteresting - things we don't want but need to watch out for
+# paren_stack
+# curly_stack
+# s - whitespace
+# decl_extra
+#
+### INTERESTING
+#
+# interesting - things we do want; they'll all add data in the right places
+# ident
+#
+### TYPES
+#
+# native
+# struct
+# union
+# typedeffed
+# type_extra
+# type
+#
+### TYPEDEFS
+#
+# typedef
+#
+### DATA
+#
+# array_spec - the [expr] that determines the size of an array
+# data
+# variable_decl
+#
+### STRUCTS AND UNIONS
+#
+# data_block - for use in struct_decl and union_decl
+# struct_decl - can appear inside type
+# union_decl - can appear inside type
+#
+### FUNCTIONS
+#
+# signature
+# function_decl
+# function_pointer - will appear in data
+#
+#####
+
+
+
+
+
+
+
+ # Huffman coding
+$s = '(?&s)';
+
+ # Meta expressions
+$INIT_STR   = qr/(?{ push @oldm, $m; $m = "" })/sx;
+$INIT_ARRAY = qr/(?{ push @oldm, $m; $m = [] })/sx;
+$INIT_HASH  = qr/(?{ push @oldm, $m; $m = {} })/sx;
+$INIT_TYPE  = qr/(?{ push @oldm, $m; $m = {qw<point 0 const 0 restrict 0 volatile 0 extension 0>} })/sx;
+$SUCCEED    = qr/(?{ $r = $m; $m = pop @oldm })/sx;
+$FAIL       = qr/(?{ $m = pop @oldm }) (*FAIL)/sx;
+
+ # anonymous struct and union handlers
+our $anon_struct_no = 0;  # not state so it can be reset
+our $anon_union_no = 0;
+our $anon_param_no = 0;  # gets reset by signature rule
+sub name_anon_struct {
+	'anon-struct_' . $anon_struct_no++;
+}
+sub name_anon_union {
+	'anon-union_' . $anon_union_no++;
+}
+sub name_anon_param {
+	'anon-param_' . $anon_param_no++;
+}
+
+our $grammar = qr/ (?(DEFINE)
+
+
+
+### UNINTERESTING
+
+
+ # preprocessed code shouldn't have comments but whatever
+(?<comment> (?>
+	\/\* .*? \*\/
+))
+
+(?<ppmessage> (?>
+	^ \# .*? \R
+))
+
+(?<string> (?>
+	\" (?: \\\" | \\\\\ | [^"] )* \"
+))
+
+(?<uninteresting> (?>  # things we don't want but have to watch out for
+	(?&comment) | (?&ppmessage) | (?&string)
+))
+
+(?<paren_stack> (?>
+	\( (?: (?&uninteresting) | (?&paren_stack) | [^\)] )* \)
+))
+(?<curly_stack> (?>
+	\{ (?: (?&uninteresting) | (?&curly_stack) | [^}] )* \}
+))
+
+(?<s> (?>  # whitespace required only between alphanumerics
+	  (?: (?&comment) | (?&ppmessage) | \s)+
+	| (?<!\w)
+	| (?!\w)
+))
+
+(?<decl_extra> (?>  # I think we don't care about these
+	  extern
+	| static
+	| auto
+	| register
+))
+
+
+
+### INTERESTING
+
+
+(?<interesting> (?>  # These capture their own things.
+	  (?&typedef)
+	| (?&variable_decl)
+	| (?&function_decl)
+	| (?&struct_decl) $s ;
+	| (?&union_decl) $s ;
+))
+
+
+
+(?<ident> (?> $INIT_STR (?:
+	([a-zA-Z_] \w*) (?{ $m = $^N })
+) $SUCCEED | $FAIL ))
+
+
+
+### TYPES
+
+
+(?<native> (?> $INIT_STR (?:
+	  void                            (?{ $m = 'v'  })
+	| unsigned $s long $s long $s int (?{ $m = 'uh' })
+	| unsigned $s long $s long        (?{ $m = 'uh' })
+	| unsigned $s long $s int         (?{ $m = 'ul' })
+	| unsigned $s long                (?{ $m = 'ul' })
+	| unsigned $s short int           (?{ $m = 'us' })
+	| unsigned $s short               (?{ $m = 'us' })
+	| unsigned $s char                (?{ $m = 'uc' })
+	| unsigned $s int                 (?{ $m = 'ui' })
+	| unsigned                        (?{ $m = 'ui' })
+	| signed $s long $s long $s int   (?{ $m = 'sh' })
+	| signed $s long $s long          (?{ $m = 'sh' })
+	| signed $s long $s int           (?{ $m = 'sl' })
+	| signed $s long                  (?{ $m = 'sl' })
+	| signed $s short $s int          (?{ $m = 'ss' })
+	| signed $s short                 (?{ $m = 'ss' })
+	| signed $s char                  (?{ $m = 'sc' })
+	| signed $s int                   (?{ $m = 'si' })
+	| signed                          (?{ $m = 'si' })
+	| long $s long $s int             (?{ $m = 'sh' })
+	| long $s long                    (?{ $m = 'sh' })
+	| long $s int                     (?{ $m = 'sl' })
+	| long                            (?{ $m = 'sl' })
+	| short $s int                    (?{ $m = 'ss' })
+	| short                           (?{ $m = 'ss' })
+	| char                            (?{ $m = '?c' })
+	| int                             (?{ $m = 'si' })
+	| long $s double                  (?{ $m = 'ld' })
+	| double                          (?{ $m = 'd'  })
+	| float                           (?{ $m = 'f'  })
+	| _Imaginary                      (?{ $m = 'I'  })
+	| _Complex                        (?{ $m = 'C'  })
+	| _Bool                           (?{ $m = 'B'  })
+) $SUCCEED | $FAIL ))
+
+(?<struct> (?> $INIT_STR (?:
+	  (?&struct_decl) (?{$m = $r})
+	| struct $s (?&ident) (?{$m = $r})
+) $SUCCEED | $FAIL ))
+
+(?<union> (?> $INIT_STR (?:
+	  (?&union_decl) (?{$m = $r})
+	| struct $s (?&ident) (?{$m = $r})
+) $SUCCEED | $FAIL ))
+
+(?<typedeffed_type> (?> $INIT_STR (?:
+	(?&ident)
+	(?#IF)  (?(?{$r ~~ %typedefs})
+		  (?#THEN)  (?{$m = $r})
+		| (?#ELSE)  (*FAIL)
+	)
+) $SUCCEED | $FAIL ))
+
+(?<type_extra> (?> $INIT_STR (?:
+	  const (?{$m = 'const'})
+	| restrict (?{$m = 'restrict'})
+	| volatile (?{$m = 'volatile'})
+	| __const (?{$m = 'const'})
+	| __restrict (?{$m = 'restrict'})
+	| __volatile (?{$m = 'volatile'})
+	| __extension__ (?{$m = 'extension'})
+) $SUCCEED | $FAIL ))
+
+(?<type> (?> $INIT_TYPE (?:
+	(?:
+		(?&type_extra) $s (?{ $m->{$r} = 1 })  # These are all boolean things
+	)*
+	(?:
+		  (?&struct) (?{
+			$m->{type} = 'struct';
+			$m->{ident} = $r;
+		  })
+		| (?&union) (?{
+			$m->{type} = 'union';
+			$m->{ident} = $r;
+		  })
+		| (?&native) (?{
+			$m->{type} = 'native';
+			$m->{ident} = $r;
+		  })
+		| (?&typedeffed_type) (?{
+			$m->{type} = 'typedeffed';
+			$m->{ident} = $r;
+		  })
+	)
+	(?:
+		$s \* (?{ $m->{point}++ })
+	)*
+	(?:
+		$s (?&type_extra) (?{ $m->{$r} = 1 })
+	)*
+) $SUCCEED | $FAIL ))
+
+(?<typedef> (?>
+	typedef $s
+	(?&type) $s (?{ $typedef_type = $r })
+	(?&ident) $s (?{ $typedefs{$r} = $typedef_type })
+	;
+))
+
+
+
+### DATA
+
+
+(?<array_spec> (?> $INIT_STR (?:
+	\[ $s (?:
+		  (\d+)       (?{ $m = $^N })
+		| \( (\d+) \) (?{ $m = $^N })
+		| ([^\]]*)    (?{ $m = $^N; $needs_eval{$m} = 1 })
+	) $s \]
+) $SUCCEED | $FAIL ))
+
+
+
+(?<data> (?> $INIT_ARRAY (?:
+	(?&type) $s (?{ $m->[0] = {type => $r, array => 0} })
+	(?:
+		(?&ident) (?{ $m->[0]{ident} = $r })
+		(?: $s (?&array_spec) (?{ $m->[0]{array} = $r }) )?
+	) (?: $s , $s
+		(?&ident) (?{ push @{$m}, {type => {%{$m->[0]{type}}}, array => 0, ident => $r} })
+		(?: $s (?&array_spec) (?{ $m->[-1]{array} = $r }) )?
+	)*
+) $SUCCEED | $FAIL ))
+
+(?<variable_decl> (?>  # returns no data
+	(?: (?&decl_extra) $s )*
+	(?&data) $s (?{ map {$variables{$_->{ident}} = $_} @{$r} })
+	(?: ; | = [^;]+ ; )
+))
+
+(?<_data> (?> $INIT_HASH (?:
+	(?&type) $s (?{$m->{type} = $r})
+	(?&ident) (?{$m->{ident} = $r; $m->{array} = 0})
+	(?: (?&array_spec) (?{$m->{array} = $r}) )?
+) $SUCCEED | $FAIL ))
+
+(?<_data_decl> (?> $INIT_ARRAY (?:
+	(?: (?&decl_extra) $s)?
+	(?&data)  (?{ push @{$m}, $r; local $prevtype = $r->{type} })
+	(?: $s , $s (?&ident)
+		(?{ push @{$m}, { type => {%{$prevtype}}, ident => $r, array => 0 } })
+		(?: (?&array_spec) (?{$m->[-1]{array} = $r}) )?
+	)*		# Kinda cheating but who cares
+	$s ;
+) $SUCCEED | $FAIL ))
+
+
+
+### STRUCTS AND UNIONS
+
+
+(?<data_block> (?> $INIT_ARRAY (?:
+	{ $s (?:
+		(?&data) $s ; (?{ push @{$m}, @{$r} })
+	$s )* }
+) $SUCCEED | $FAIL ))
+
+
+(?<struct_decl> (?> $INIT_STR (?:
+	struct $s (?:
+		  (?&ident) (?{ $m = $r })
+		| (?{ $m = name_anon_struct() })
+	) $s (?&data_block) (?{ $structs{$m} = $r })
+) $SUCCEED | $FAIL ))
+
+(?<union_decl> (?> $INIT_STR (?:
+	union $s (?:
+		  (?&ident) (?{ $m = $r })
+		| (?{ $m = name_anon_union() })
+	) $s (?&data_block) (?{ $unions{$m} = $r })
+) $SUCCEED | $FAIL ))
+
+
+
+### FUNCTIONS
+
+
+ # signature is the only rule to create an array of hash
+(?<signature> (?> $INIT_ARRAY (?{ $anon_param_no = 0 }) (?:
+	  \( $s (?:void $s)? \)  # leave this empty
+	| \( $s (?:
+		(?&type) (?{ push @{$m}, {type => $r, ident => name_anon_param()} })
+		(?: $s (?&ident) (?{ $m->[-1]{ident} = $r }) )?
+	  ) (?: $s , $s
+	  	(?&type) (?{ push @{$m}, {type => $r, ident => name_anon_param()} })
+		(?: $s (?&ident) (?{ $m->[-1]{ident} = $r }) )?
+	  )* $s \)
+) $SUCCEED | $FAIL ))
+
+(?<function_attribute> (?>  # ignore
+	__\w+__ | \( (?&paren_stack) \)
+))
+
+(?<function_decl> (?> $INIT_HASH (?:
+	(?: (?&decl_extra) $s )*
+	(?: (?&function_attribute) $s )*
+	(?&type) $s (?{ $m->{ret} = $r })
+	(?&ident) $s (?{ $m->{ident} = $r })
+	(?&signature) $s (?{ $m->{args} = $r })
+	(?: (?&function_attribute) $s )*
+	(?: (?&curly_stack) | ; )
+	(?{ $functions{$m->{ident}} = $m })
+) $SUCCEED | $FAIL ))
+
+
+
+) /sx;
+
+$DEBUG and do {
+	require Data::Dumper;
+	sub test_re ($$) {
+		my ($rulename, $test) = @_;
+		our $last_rule_tested = $rulename;
+		die "$rulename did not parse \"$test\"\n"
+		 unless $test =~ /(?:^(?&$rulename)$) $grammar/sx;
+	}
+	sub test_eval ($$) {
+		my ($code, $value) = @_;
+		my $result = eval $code;
+		die "After $last_rule_tested, '$code' returned '$result' instead of '$value'\n"
+		 unless $result eq $value;
+	}
+	test_re 'comment', '/* some commenty stuff * / /* */';
+	test_re 'ppmessage', "# this is a ppmessage\n";
+	test_re 'string', '"ds c ca\\" \\\\"';
+	test_re 'ident', 'asdc_CD43254_2ff';
+	 test_eval '$r', 'asdc_CD43254_2ff';
+	test_re 'native', 'void';
+	 test_eval '$r', 'v';
+	test_re 'native', 'signed long int';
+	test_re 'type', 'unsigned int';
+	 test_eval '$r->{type}', 'native';
+	 test_eval '$r->{ident}', 'ui';
+	test_re 'type', '__const char *__restrict';
+	 test_eval '$r->{const}', 1;
+	 test_eval '$r->{ident}', '?c';
+	 test_eval '$r->{point}', 1;
+	%typedefs = (something => 'whatever');
+	test_re 'type', 'something*';
+	 test_eval '$r->{type}', 'typedeffed';
+	 test_eval '$r->{ident}', 'something';
+	test_re 'data', '__const char *__restrict __crypt';
+	test_re 'variable_decl', 'extern int*** a, b[74] ;';
+	 test_eval '$variables{a}{type}{type}', 'native';
+	 test_eval '$variables{a}{type}{ident}', 'si';
+	 test_eval '$variables{a}{ident}', 'a';
+	 test_eval '$variables{b}{ident}', 'b';
+	 test_eval '$variables{a}{type}{point}', 3;
+	 test_eval '$variables{b}{type}{point}', 3;
+	 test_eval '$variables{b}{array}', 74;
+	 test_eval '$variables{a}{array}', 0;
+	test_re 'data', 'char buffer[(100) > 32 ? (100) : 32]';
+	 test_eval '$r->[0]{array}', '(100) > 32 ? (100) : 32';
+	 test_eval '$needs_eval{\'(100) > 32 ? (100) : 32\'}', 1;
+	test_re 'data_block', '{int size; const char* label; void* data;}';
+	 test_eval '$r->[0]{type}{ident}', 'si';
+	 test_eval '$r->[1]{type}{const}', 1;
+	test_re 'struct_decl', 'struct {int size; const char* label; void* data;}';
+	test_re 'variable_decl', 'struct {int size; const char* label; void* data;} somestuff;';
+	 test_eval '$variables{somestuff}{ident}', 'somestuff';
+	 our $sid = $variables{somestuff}{type}{ident};
+	 test_eval '$sid =~ /^anon-struct_\d+$/', 1;
+	 test_eval '$structs{$sid}[0]{type}{ident}', 'si';
+	 test_eval '$structs{$sid}[0]{ident}', 'size';
+	 test_eval '$structs{$sid}[1]{type}{const}', 1;
+	 test_eval '$structs{$sid}[2]{type}{ident}', 'v';
+	 test_eval '$structs{$sid}[2]{type}{point}', 1;
+	 test_eval '$structs{$sid}[2]{type}{const}', 0;
+	 test_eval '$structs{$sid}[2]{ident}', 'data';
+	test_re 'struct', 'struct coords {int x, y;}';
+	 test_eval '$structs{coords}[1]{type}{ident}', 'si';
+	test_re 'union_decl', 'union {float x; int repr;}';
+	test_re 'union_decl', 'union { struct { int x, y; } rec; struct {int mag, ang;} pol;}';
+	test_re 'struct_decl', 'struct vector {int type; union {struct rec { int x, y; } rec; struct pol {int mag, ang;} pol;} data; }';
+	test_re 'variable_decl', 'struct vector force;';
+	 test_eval '$variables{force}{type}{type}', 'struct';
+	 test_eval '$variables{force}{type}{ident}', 'vector';
+	 test_eval '$structs{vector}[0]{ident}', 'type';
+	 test_eval '$structs{vector}[1]{type}{type}', 'union';
+	 test_eval '$structs{vector}[1]{ident}', 'data';
+	 our $uid = $structs{vector}[1]{type}{ident};
+	 test_eval '$unions{$uid}[0]{type}{type}', 'struct';
+	 test_eval '$unions{$uid}[0]{ident}', 'rec';
+	 test_eval '$unions{$uid}[1]{ident}', 'pol';
+	 test_eval '$unions{$uid}[1]{type}{ident}', 'pol';
+	 test_eval '$structs{rec}[1]{ident}', 'y';
+	 test_eval '$structs{pol}[0]{ident}', 'mag';
+	test_re 'function_decl', 'int main() { stuff { "}" /*}*/ } }';
+	 test_eval '$r->{ret}{ident}', 'si';
+	 test_eval 'scalar @{$r->{args}}', '0';  # no arguments
+	 test_eval '$r->{ident}', 'main';
+	test_re 'type', '__const char *';
+	test_re 'signature', '(__const char *__key, __const char *__salt)';
+	test_re 'function_decl', 'extern char *crypt (__const char *__key, __const char *__salt);';
+	test_re 'function_decl', 'extern char *crypt (__const char *__key, __const char *__salt) __attribute__ ((__nothrow__)) __attribute__ ((__nonnull__ (1, 2)));';
+	 test_eval '$r->{args}[0]{type}{ident}' ,'?c';
+	 test_eval '$r->{args}[0]{type}{type}', 'native';
+	 test_eval '$r->{args}[0]{ident}', '__key';
+	test_re 'function_decl', 'int dosomething(int, int);';
+	 test_eval '$r->{args}[0]{ident}', 'anon-param_0';
+	 test_eval '$r->{args}[1]{ident}', 'anon-param_1';
+	test_re 'typedef', 'typedef unsigned long int uint32;';
+	 test_eval '$typedefs{uint32}{type}', 'native';
+	 test_eval '$typedefs{uint32}{ident}', 'ul';
+	test_re 'typedef', 'typedef short int Sint16;';
+	test_re 'typedef', 'typedef unsigned short Uint16;';
+	test_re 'type', 'Uint16';
+	test_re 'type', 'struct SDL_Rect { Sint16 x, y; Uint16 w, h; }';
+	test_re 'typedef', 'typedef struct SDL_Rect {
+			Sint16 x, y;
+			Uint16 w, h;
+		} SDL_Rect;';  # Cannot have whitespace around test string
+	test_re 'typedef', 'typedef void SDL_Surface;';
+	test_re 'function_decl', 'extern __attribute__ ((visibility("default"))) int SDL_UpperBlit
+			(SDL_Surface *src, SDL_Rect *srcrect,
+			 SDL_Surface *dst, SDL_Rect *dstrect);';
+
+	warn "Everything's good.\n";
+	$anon_struct_no = 0;
+	$anon_union_no = 0;
+	%typedefs = ();
+	%structs = ();
+	%unions = ();
+	%needs_eval = ();
+	%variables = ();
 };
 
 
 
-
-sub test_re {
-	my ($rulename, $test) = @_;
-	die "$rulename did not parse \"$test\"\n" unless $test =~ /$rulename/
-};
-$test_re_test_re = qr/ abc /sx;
-test_re $test_re_test_re, 'abc';
-
-
-
+1;

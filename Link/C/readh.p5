@@ -7,10 +7,8 @@ package ReadH;
 $0 =~ m[ (.*?) / [^/]+ $ ]x or die "Could not find directory of $0\n";
 my $mydir = $1;
 
-undef $!;
-do "$mydir/readh.pg5";  # perl 5 grammar
-$@ and die $@;
-$! and die $!;
+do "$mydir/readh.pg5" # Perl 5 grammar
+ or die $@ // $!;
 
 my $preprocess = `which gcc` ? 'gcc -E' : `which cpp` ? 'cpp' : die "Cannot find cpp in PATH.\n";
 my $readelf = `which readelf` ? 'readelf -W -s' : die "Cannot find readelf in PATH.\n";
@@ -107,9 +105,15 @@ run_grammar($processed_headers);
 
 sub resolve_type {
 	our %typedefs;
-	exists $typedefs{$_[0]}
-		? resolve_type($typedefs{$_[0]})
-		: regularize_type($_[0]);
+	my $point = $_[1] // 0;
+	if ($_[0]{type} eq 'typedeffed') {
+		$point += $_[0]{point};
+		resolve_type($typedefs{$_[0]{ident}}, $point)
+	}
+	else {
+		$point += $_[0]{point};
+		$_[0]{ident} . ' *' x $point;
+	}
 }
 
 sub regularize_type {
@@ -120,15 +124,17 @@ sub regularize_type {
 
 #say for keys %library_symbols;
 #say "F";
-our @functions;
+our %functions;
+our %typedefs;
+say for keys %typedefs;
  # Print in a format that can be read quickly by Rakudo
-for (grep {$_->{name} ~~ @{[keys %library_symbols]}} @functions) {
-	my $rt = resolve_type($_->{returns});
-	my @at = map resolve_type($_), @{$_->{arguments}};
+for (grep {$functions{$_}{ident} ~~ @{[keys %library_symbols]}} keys %functions) {
+	my $rt = resolve_type($functions{$_}{ret});
+	my @at = map resolve_type($_->{type}), @{$functions{$_}{args}};
 	next if grep /^struct/, $rt, @at;
 	say join " : ",
-	 $library_symbols{$_->{name}},
-	 $_->{name},
+	 $library_symbols{$functions{$_}{ident}},
+	 $functions{$_}{ident},
 	 $rt,
 	 @at
 };
