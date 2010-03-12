@@ -11,7 +11,7 @@ do "$mydir/readh.pg5" # Perl 5 grammar
  or die $@ // $!;
 
 my $preprocess = `which gcc` ? 'gcc -E' : `which cpp` ? 'cpp' : die "Cannot find cpp in PATH.\n";
-my $readelf = `which readelf` ? 'readelf -W -s' : die "Cannot find readelf in PATH.\n";
+my $nm = `which nm` ? 'nm -P -D' : die "Cannot find nm in PATH.\n";
 
 our @header_files;
 our @library_files;
@@ -40,12 +40,11 @@ if (!@library_files) {
 
  # Get linkable symbols from libraries.
  # symbol_name => library_file
- # The format readelf return is " no: position size type bind vis ndx name "
 our %library_symbols = map {
 	my $lib = $_;
-	my @sections = map [split /\s+/, $_], qx"$readelf $lib";
-	@sections = grep {defined $_->[4] and $_->[4] eq 'FUNC' && $_->[3] != 0} @sections;
-	map { $_->[8] =~ /^(\w+)/ and $1 => $lib } @sections;
+	my @sections = map [split /\s+/, $_], qx"$nm $lib";
+	@sections = grep {defined $_->[1] and $_->[1] eq 'T'} @sections;
+	map { $_->[0] => $lib } @sections;
 } @library_files;
 
  # Get preprocess header files.

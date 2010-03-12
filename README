@@ -52,7 +52,7 @@ Copy the Link directory to wherever you keep your perl 6 libraries.
 DEPENDENCIES:
 
 perl >= 5.10
-readelf
+nm
 gcc or cpp
 
 
