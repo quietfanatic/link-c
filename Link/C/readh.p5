@@ -41,8 +41,9 @@ if (!@library_files) {
  # Get linkable symbols from libraries.
  # symbol_name => library_file
 our %library_symbols = map {
-	my $lib = $_;
-	my @sections = map [split /\s+/, $_], qx"$nm $lib";
+	my $shslib = my $lib = $_;
+	$shslib =~ s/'/'\\''/g;
+	my @sections = map [split /\s+/, $_], qx"$nm '$shslib'";
 	@sections = grep {defined $_->[1] and $_->[1] eq 'T'} @sections;
 	map { $_->[0] => $lib } @sections;
 } @library_files;
