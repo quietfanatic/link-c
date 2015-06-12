@@ -8,6 +8,131 @@ constant @HEADER_DIRS = <. /usr/include>, @*INC;
 constant @LIBRARY_DIRS = <. /lib /usr/lib>, @*INC;
 constant @LIBRARY_EXTS = '', <.so .so.0>;
 
+class Type {
+    has Bool $.const = False;
+    has Bool $.volatile = False;
+    has Bool $.restrict = False;
+}
+
+enum Width <
+    char unsigned-char signed-char
+    unsigned-short signed-short
+    unsigned-int signed-int
+    unsigned-long signed-long
+    unsigned-long-long signed-long-long
+>;
+
+class Type::Integer is Type {
+    has Width $.width = signed-int;
+    multi method gist (Type::Integer:D:) {
+        given $.width {
+            when char { 'char' }
+            when unsigned-char { 'unsigned char' }
+            when signed-char { 'signed char' }
+            when unsigned-short { 'unsigned short' }
+            when signed-short { 'short' }
+            when unsigned-int { 'unsigned int' }
+            when signed-int { 'int' }
+            when unsigned-long { 'unsigned long' }
+            when signed-long { 'long' }
+            when unsigned-long-long { 'unsigned long long' }
+            when signed-long-long { 'long long' }
+        }
+    }
+}
+class Type::Struct is Type {
+    has Str $.name;
+    multi method gist (Type::Struct:D:) { "struct $.name" }
+}
+class Type::Union is Type {
+    has Str $.name;
+    multi method gist (Type::Union:D:) { "union $.name" }
+}
+class Type::Typedef is Type {
+    has Str $.name;
+    multi method gist (Type::Typedef:D:) { "$.name (AKA <typedef lookup NYI>)" }
+}
+class Type::Pointer is Type {
+    has Type $.base;
+    multi method gist (Type::Typedef:D:) { '*' ~ $.base.gist }
+}
+class Type::Array is Type {
+    has Type $.base;
+    has uint $.size;
+    multi method gist (Type::Typedef:D:) { $.base.gist ~ "[$.size]" }
+}
+class Type::Function is Type {
+    has Type $.base;
+    has Type @.parameters;  # Ignoring parameter names
+    has Bool $.variadic = False;  # Not really sure what to do with this
+    multi method gist (Type::Function:D:) {
+        $.base.gist ~ '(' ~
+            (@.parameters.map(*.gist), ('...' if $.variadic)).join(', ')
+        ~ ')'
+    }
+}
+
+sub add-qualifiers (Type $type, @words) {
+    return $type.clone(
+        const => ?@words.grep('const'),
+        volatile => ?@words.grep('volatile'),
+        restrict => ?@words.grep('restrict')
+    );
+}
+
+sub build-base-type (@words) {
+    my Bool $unsigned = ?@words.grep('unsigned');
+    my Bool $signed = ?@words.grep('signed');
+    if $unsigned and $signed {
+        warn "Both signed and unsigned found in {@words.join: ' '}";
+        $unsigned = False;
+    }
+    my Bool $char = ?@words.grep('char');
+    my Bool $short = ?@words.grep('short');
+    my Int $longs = +@words.grep('long');
+    if $short and $longs {
+        warn "Both short and long found in {@words.join: ' '}";
+        $short = False;
+    }
+    my $width = $char       ?? $unsigned ?? unsigned-char !! $signed ?? signed-char !! char
+             !! $short      ?? $unsigned ?? unsigned-short !! signed-short
+             !! $longs == 1 ?? $unsigned ?? unsigned-long !! signed-long
+             !! $longs == 2 ?? $unsigned ?? unsigned-long-long !! signed-long-long
+             !!                $unsigned ?? unsigned-int !! signed-int;
+    return add-qualifiers(Type::Integer.new(:$width), @words);
+}
+
+sub wrap-type (Type $base, @wrappers) {
+     # Work around bug where reduce returns a list if given one item
+    if @wrappers == 0 { return $base }
+    reduce { say $^wrapper.WHAT; $^wrapper.clone(:$^base) }, $base, |@wrappers;
+}
+
+enum Storage <
+    auto extern static _Thread_local typedef
+>;
+
+class Declaration {
+    has Storage $.storage;
+    has Type $.type;
+    has Str $.name;
+     # Right now we don't care, so let's just stuff it in a string
+    has Str $.definition;
+}
+
+sub get-storage (*@words) {
+       @words.grep('extern') ?? extern
+    !! @words.grep('static') ?? static
+    !! @words.grep('_Thread_local') ?? _Thread_local
+    !! @words.grep('typedef') ?? typedef
+    !!                           auto;
+}
+
+ # TODO: actually evaluate ast
+sub eval-const-expr (Str $expr) {
+    return +$expr;
+}
+
  # Syntax ported to the best of my ability from the official C11 spec at
  # http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf
 grammar C-grammar {
@@ -114,14 +239,11 @@ grammar C-grammar {
     }
     rule postfix {
         | $<index> = ['[' ~ ']' <expression>]
-        | $<call> = ['(' ~ ')' <argument-expression-list>?]
+        | $<call> = ['(' ~ ')' [<assignment-expression>* % ',']]
         | $<dot> = ['.' <identifier>]
         | $<arrow> = ['->' <identifier>]
         | $<inc> = '++'
         | $<dec> = '--'
-    }
-    rule argument-expression-list {
-        <assignment-expression>+ % ','
     }
     rule unary-expression {
         <prefix>* [
@@ -186,24 +308,34 @@ grammar C-grammar {
 
  ##### Declarations #####
     rule declaration {
-        | <declaration-specifiers> <init-declarator-list> ';'
-        | <static_assert-declaration>
+        | <declaration-specifiers> <init-declarator>+ % ',' ';'
+            { $/.make: $<init-declarator>.map({
+                Declaration.new(
+                    storage => get-storage($<declaration-specifiers>.made),
+                    type => wrap-type(build-base-type($<declaration-specifiers>.made), $_.made<wrappers>),
+                    name => $_.made<name>,
+                    definition => $_.made<definition> // Str
+                )
+            }) }
+        | <static_assert-declaration> { $/.make: Empty }
     }
     rule declaration-specifiers {
-        [
-        | <storage-class-specifier>
-        | <type-specifier>
-        | <type-qualifier>
-        | <function-specifier>
-        | <alignment-specifier>
-        | <.attribute>
-        ]*
-    }
-    rule init-declarator-list {
-        <init-declarator>+ % ','
+        (
+        | <storage-class-specifier> { $/.make: trim ~$<storage-class-specifier> }
+        | <type-specifier> { $/.make: trim ~$<type-specifier> }
+        | <type-qualifier> { $/.make: trim ~$<type-qualifier> }
+        | <function-specifier> { $/.make: Empty }
+        | <alignment-specifier> { $/.make: Empty }
+        | <.attribute> { $/.make: Empty }
+        )* { $/.make: $0>>.made }
     }
     rule init-declarator {
         <declarator> ['=' <initializer>]?
+        { $/.make: {
+            name => $<declarator>.made<name>,
+            wrappers => $<declarator>.made<wrappers>,
+            (definition => trim $<initializer> if $<initializer>)
+        } }
     }
     rule storage-class-specifier {
         typedef | extern | static | _Thread_local | auto | register
@@ -217,31 +349,24 @@ grammar C-grammar {
         | <typedef-name>
     }
     rule struct-or-union-specifier {
-        | <struct-or-union> <.attribute>* <identifier>? '{' ~ '}' <struct-declaration-list> <.attribute>*
+        | <struct-or-union> <.attribute>* <identifier>? '{' ~ '}' <struct-declaration>* <.attribute>*
         | <struct-or-union> <identifier>
     }
     rule struct-or-union { struct | union }
      # The spec indicates a + here instead of a * here, but I think that's incorrect
-    rule struct-declaration-list { <struct-declaration>* }
     rule struct-declaration {
-        | <specifier-qualifier-list> <struct-declarator-list>? ';'
+        | <specifier-qualifier-list> <struct-declarator>* % ',' ';'
         | <static_assert-declaration>
     }
     rule specifier-qualifier-list {
-        [<type-specifier>|<type-qualifier>] <specifier-qualifier-list>?
-    }
-    rule struct-declarator-list {
-        <struct-declarator>+ % ','
+        [<type-specifier>|<type-qualifier>]+
     }
     rule struct-declarator {
         <declarator> | <declarator>? ':' <constant-expression>
     }
     rule enum-specifier {
-        | enum <identifier>? '{' ~ '}' [<enumerator-list> ','?]
+        | enum <identifier>? '{' ~ '}' [<enumerator>+ % ',' ','?]
         | enum <identifier>
-    }
-    rule enumerator-list {
-        <enumerator>+ % ','
     }
     rule enumerator {
         <enumeration-constant> <.attribute>* ['=' <constant-expression>]?
@@ -258,47 +383,68 @@ grammar C-grammar {
     rule alignment-specifier {
         _Alignas '(' ~ ')' [<type-name>|<constant-expression>]
     }
-    rule declarator { <pointer>? <direct-declarator> <.attribute>* }
+    rule declarator {
+        <pointer>? <direct-declarator> <.attribute>*
+        { $/.make: {
+            name => $<direct-declarator>.made<name>,
+            wrappers => infix:<,>(|($<pointer>.made if $<pointer>), |$<direct-declarator>.made<wrappers>)
+        } }
+    }
     rule direct-declarator {
-        [ <identifier>
-        | '(' ~ ')' <declarator>
+        [ <identifier> { $/.make: {name => ~$<identifier>, wrappers => Empty} }
+        | '(' ~ ')' <declarator> { $/.make: $<declarator>.made }
         ] <direct-declarator-postfix>*
+        { $/.make: {
+            name => $/.made<name>,
+            wrappers => infix:<,>(|$/.made<wrappers>, |$<direct-declarator-postfix>>>.made)
+        } }
     }
     rule direct-declarator-postfix {
-        | $<array> = [
-            '[' ~ ']' ['static'? <type-qualifier-list>? 'static'? <assignment-expression>? | <type-qualifier-list>? '*']
-        ]
-        | $<function> = ['(' ~ ')' [<parameter-type-list>|<identifier-list>]?]
+        | '[' ~ ']' ['static'? <type-qualifier>* 'static'? <assignment-expression>? | <type-qualifier>* '*']
+            { $/.make: add-qualifiers(Type::Array.new(size => eval-const-expr(~$<assignment-expression>)), ~<<$<type-qualifier>) }
+        | '(' ~ ')' [<parameter-declaration>+ % ',' (',' '...')?]?  # Leaving out old-fashioned typeless parameters
+            { $/.make: Type::Function.new(parameters => $<parameter-declaration>>>.made, variadic => ?$0)}
     }
     rule pointer {
-        '*' <type-qualifier-list>? <pointer>?
+        '*' <type-qualifier>* <pointer>?
+        { $/.make: infix:<,>(add-qualifiers(Type::Pointer.new, ~<<$<type-qualifier>), |($<pointer>.made if $<pointer>)) }
     }
-    rule type-qualifier-list { <type-qualifier>+ }
-    rule parameter-type-list { <parameter-list> [',' '...']? }
-    rule parameter-list { <parameter-declaration>+ % ',' }
     rule parameter-declaration {
         <declaration-specifiers> [<declarator>|<abstract-declarator>]?
-    }
-    rule identifier-list {
-        <identifier>+ % ','
+        {   my $wrappers = $<declarator> ?? $<declarator>.made<wrappers>
+                        !! $<abstract-declarator> ?? $<abstract-declarator>.made
+                        !! Empty;
+            $/.make: Declaration.new(
+                storage => auto,
+                type => wrap-type(build-base-type($<declaration-specifiers>), $wrappers),
+                name => $<declarator> ?? $<declarator>.made<name> !! Str,
+            )
+        }
     }
     rule type-name {
         <specifier-qualifier-list> <abstract-declarator>?
     }
     rule abstract-declarator {
         <pointer> | <pointer>? <direct-abstract-declarator>
+        { $/.make: infix:<,>(
+            |($<pointer>.made if $<pointer>),
+            |($<direct-abstract-declarator>.made if $<direct-abstract-declarator>)
+        ) }
+
     }
     rule direct-abstract-declarator {
-        [ '(' ~ ')' <abstract-declarator> ] <direct-abstract-declarator-postfix>*
+        [ '(' ~ ')' <abstract-declarator> { $/.make: $<abstract-declarator>.made }
+        ]?
+        <direct-abstract-declarator-postfix>*
+        { $/.make: infix:<,>(|$/.made, |$<direct-abstract-declarator-postfix>>>.made) }
     }
     rule direct-abstract-declarator-postfix {
-        | $<array> = [
-            '[' ~ ']' ['static'? <type-qualifier-list>? 'static'? <assignment-expression>? | <type-qualifier-list>? '*']
-        ]
-        | $<function> = '(' ~ ')' <parameter-type-list>?
+        | '[' ~ ']' ['static'? <type-qualifier>* 'static'? <assignment-expression>? | <type-qualifier>* '*']
+            { $/.make: add-qualifiers(Type::Array.new(size => eval-const-expr($<assignment-expression>)), ~<<$<type-qualifier>) }
+        | '(' ~ ')' [<parameter-declaration>+ % ',' (',' '...')?]?  # Leaving out old-fashioned typeless parameters
+            { $/.make: Type::Function.new(parameters => $<parameter-declaration>>>.made, variadic => ?$0)}
     }
-     # TODO: recognize only previously-declared typedef names
-    rule typedef-name { <!> }
+    rule typedef-name { <!> }  # TODO: typedefs
     rule initializer {
         | <assignment-expression>
         | '{' ~ '}' [<initializer-list> ','?]
@@ -338,7 +484,7 @@ grammar C-grammar {
         | $<while> = while '(' ~ ')' <expression> <statement>
         | $<do-while> = do <statement> while '(' ~ ')' <expression>
         | $<for> = for '(' ~ ')' [
-            [$<pre> = [<expression> | <declaration>]]? ';'
+           .[$<pre> = [<expression> | <declaration>]]? ';'
             [$<check> = <expression>]? ';'
             [$<iterate> = <expression>]?
         ]
@@ -351,10 +497,23 @@ grammar C-grammar {
     }
 
  ##### External definitions #####
-    rule translation-unit { <external-declaration>+ }
-    rule external-declaration { <function-definition> | <declaration> }
+    rule translation-unit { <external-declaration>+ { $/.make: $<external-declaration>>>.made } }
+    rule external-declaration {
+        | <function-definition> { $/.make: $<function-definition>.made }
+        | <declaration> { $/.make: $<declaration>.made }
+    }
     rule function-definition {
         <declaration-specifiers> <declarator> <declaration>* <compound-statement>
+        {
+            $<declaration> == 0
+                or fail "Old-style function parameter declarations not supprted, sorry";
+            $/.make: Declaration.new(
+                storage => get-storage($<declaration-specifiers>.made),
+                type => wrap-type(build-base-type($<declaration-specifiers>.made), $<declarator>.made<wrappers>),
+                name => $<declarator>.made<name>,
+                definition => ~$<compound-statement>
+            )
+        }
     }
 
  ##### Extensions #####
@@ -365,28 +524,12 @@ grammar C-grammar {
     rule attribute { __attribute__ '((' ~ '))' <.attribute_contents> }
     token attribute_contents { ['(' ~ ')' <.attribute_contents> | <-[()]>]* }
 
-    rule TOP { ^ <translation-unit> $ }
-
-=begin asdf
- ##### Actions #####
-    class Actions {
-         # External definitions
-        method translation-unit ($/) {
-            my %r;
-            %r.push: $_ for $<external-declaration>>>.made;
-            $/.make: %r;
-        }
-        method external-declaration ($/) {
-            $/make: $<function-definition> ?? function => $<function-definition>.made
-                                           !! declaration => $<declaration>.made;
-        }
-        method function-declaration ($/) {
-            my $
-        method TOP ($/) { $/.make: $<translation-unit>.made }
-    }
-=end asdf
-
+    rule TOP { ^ <translation-unit> $ { $/.make: $<translation-unit>.made } }
 }
 
-say 0;
-say C-grammar.parse(slurp).gist;
+say '0=====';
+my $match = C-grammar.parse(slurp);
+say $match;
+say '1=====';
+say $match.made;
+say '2=====';
