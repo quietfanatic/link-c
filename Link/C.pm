@@ -8,6 +8,8 @@ constant @HEADER_DIRS = <. /usr/include>, @*INC;
 constant @LIBRARY_DIRS = <. /lib /usr/lib>, @*INC;
 constant @LIBRARY_EXTS = '', <.so .so.0>;
 
+class Declaration { ... }
+
 class Type {
     has Bool $.const = False;
     has Bool $.volatile = False;
@@ -63,7 +65,7 @@ class Type::Array is Type {
 }
 class Type::Function is Type {
     has Type $.base;
-    has Type @.parameters;  # Ignoring parameter names
+    has Declaration @.parameters;  # Ignoring parameter names
     has Bool $.variadic = False;  # Not really sure what to do with this
     multi method gist (Type::Function:D:) {
         $.base.gist ~ '(' ~
@@ -118,6 +120,9 @@ class Declaration {
     has Str $.name;
      # Right now we don't care, so let's just stuff it in a string
     has Str $.definition;
+    multi method gist (Declaration:D:) {
+        ($.storage, "($.type.gist())", $.name // Empty, $.definition // Empty).join(' ');
+    }
 }
 
 sub get-storage (*@words) {
@@ -416,7 +421,7 @@ grammar C-grammar {
                         !! Empty;
             $/.make: Declaration.new(
                 storage => auto,
-                type => wrap-type(build-base-type($<declaration-specifiers>), $wrappers),
+                type => wrap-type(build-base-type($<declaration-specifiers>.made), $wrappers),
                 name => $<declarator> ?? $<declarator>.made<name> !! Str,
             )
         }
@@ -426,17 +431,17 @@ grammar C-grammar {
     }
     rule abstract-declarator {
         <pointer> | <pointer>? <direct-abstract-declarator>
-        { $/.make: infix:<,>(
+        { $/.make: (infix:<,>(
             |($<pointer>.made if $<pointer>),
             |($<direct-abstract-declarator>.made if $<direct-abstract-declarator>)
-        ) }
+        )) }
 
     }
     rule direct-abstract-declarator {
         [ '(' ~ ')' <abstract-declarator> { $/.make: $<abstract-declarator>.made }
         ]?
         <direct-abstract-declarator-postfix>*
-        { $/.make: infix:<,>(|$/.made, |$<direct-abstract-declarator-postfix>>>.made) }
+        { $/.make: (infix:<,>(|$/.made, |$<direct-abstract-declarator-postfix>>>.made)) }
     }
     rule direct-abstract-declarator-postfix {
         | '[' ~ ']' ['static'? <type-qualifier>* 'static'? <assignment-expression>? | <type-qualifier>* '*']
