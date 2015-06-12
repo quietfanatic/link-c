@@ -1,326 +1,365 @@
 
-### Link::C will automatically link your C libraries for you.
+##### Link::C will automatically link your C libraries for you. #####
 use v6;
-module Link::C;
+unit module Link::C;
 
+##### TODO: figure out where to get this information #####
 constant @HEADER_DIRS = <. /usr/include>, @*INC;
 constant @LIBRARY_DIRS = <. /lib /usr/lib>, @*INC;
 constant @LIBRARY_EXTS = '', <.so .so.0>;
 
-sub link(
-		*@files is copy,
-		:$verbose?,
-		:$quiet?,
-		:$cache = 1,
-		:$link = *,
-		:$import?,
-		:$skip?,
-) {
-	call_only_once;
-	for @files {
-		if $_ ~~ /\.<[hc]>$/ {
-			resolve_header($_)
-		}
-		else {
-			resolve_library($_)
-		}
-	}
-	 # Find the filename of the calling program, for caching
-	my $caller = Q:PIR {
-		$P0 = getinterp
-		$P0 = $P0['annotations';1]
-		%r = $P0['file']
-	};
-	my $linking_code;
-	 # using 'use' picks the .pir file before the .pm file
-	 # but if the .pir file does not exist we won't know.
-	if $cache and $cache eq 'always' or check_newer("$caller.linkc-cache.pm", $caller, @files) {
-		  warn "Using cache" if $verbose;
-		$linking_code = "use \"$caller.linkc-cache\"";
-	}
-	else {
-		  warn "Not using cache" if $verbose;
-		  warn "Reading headers and libraries" if $verbose;
-		readh(@files, :$link, :$skip);
-		  warn "Generating code" if $verbose;
-		$linking_code = gen_linking_code(:$import);
-		if $cache { write_cache($caller, $linking_code, :$verbose, :$quiet) };
-	}
-	  warn "Linking" if $verbose;
-	undefine $!;
-	eval $linking_code;
-	die $! if $!;
-	  warn "Done" if $verbose;
+ # Syntax ported to the best of my ability from the official C11 spec at
+ # http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf
+grammar C-grammar {
+ ##### Identifiers #####
+    token identifier { <.identifier-nondigit> [<.identifier-nondigit> | <.digit>]* }
+     # TODO: unicode
+    token identifier-nondigit { <.alpha> | <.universal-character-name> }
+
+ ##### Universal character names #####
+    token universal-character-name {
+        | '\u' $<four> = <.xdigit> ** 4
+        | '\U' $<eight> = <.xdigit> ** 8
+    }
+
+ ##### Constants #####
+    token constant {
+        | <integer-constant>
+        | <floating-constant>
+        | <enumeration-constant>
+        | <character-constant>
+    }
+    token integer-constant {
+        [ <decimal-constant>
+        | <octal-constant>
+        | <hexadecimal-constant>
+        ] <integer-suffix>?
+    }
+    token decimal-constant { <[1..9]><[0..9]>* }
+    token octal-constant { 0<[0..7]>* }
+    token hexadecimal-constant { [0x|0X]<xdigit>+ }
+    token integer-suffix {
+        | $<unsigned-suffix> = [u|U]
+        | $<long-suffix> = [l|L]
+        | $<long-long-suffix> = [ll|LL]
+    }
+    token floating-constant {
+        | <decimal-floating-constant>
+        | <hexadecimal-floating-constant>
+    }
+    token decimal-floating-constant {
+        | <fractional-constant> <exponent-part>? <floating-suffix>?
+        | <digit>+ <exponent-part> <floating-suffix>?
+    }
+    token hexadecimal-floating-constant {
+        [0x|0X] [<hexadecimal-fractional-constant> | <xdigit>+] <floating-suffix>?
+    }
+    token fractional-constant {
+        | <digit>* '.' <digit>+
+        | <digit>+ '.'
+    }
+    token exponent-part {
+        [e|E] $<sign> = ['+'|'-']? <digit>+
+    }
+    token hexadecimal-fractional-constant {
+        | <xdigit>* '.' <xdigit>+
+        | <xdigit>+ '.'
+    }
+    token binary-exponent-part {
+        [p|P] $<sign> = ['+'|'-']? <xdigit>+
+    }
+    token floating-suffix {
+        | $<float-suffix> = [f|F]
+        | $<double-suffix> = [l|L]
+    }
+    token enumeration-constant { <identifier> }
+    token character-constant {
+        $<prefix> = [L|u|U]?
+        \' ~ \' <c-char>+
+    }
+    token c-char {
+        <-[\\']>
+        | <escape-sequence>
+    }
+    token escape-sequence { '\\' [  # Factored the \ out, different from the spec
+        | $<simple-escape-sequence> = \' | '"' | '?' | '\\' | 'a' | 'b' | 'f' | 'n' | 'r' | 't' | 'v'
+        | $<octal-escape-sequence> = [0..7] ** 1..3
+        | $<hexadecimal-escape-sequence> = 'x' <xdigit>+
+    ] }
+
+ ##### String literals #####
+    token string-literal {
+        <encoding-prefix>? '"' ~ '"' <s-char>*
+    }
+    token encoding-prefix { u8 | u | U | L }
+
+ ##### Expressions #####
+    rule primary-expression {
+        | <identifier>
+        | <constant>
+        | <string-literal>
+        | '(' ~ ')' <expression>
+        | <generic-selection>
+    }
+    rule generic-selection {
+        _Generic '(' ~ ')' [<assignment-expression> ',' <generic-association>+]
+    }
+    rule generic-association {
+        [<type-name> | default] ':' <assignment-expression>
+    }
+    rule postfix-expression {
+        [ <primary-expression>
+        | $<list> = '(' ~ ')' <type-name> '{' ~ '}' [<initializer-list> ','?]
+        ] <postfix>*
+    }
+    rule postfix {
+        | $<index> = '[' ~ ']' <expression>
+        | $<call> = '(' ~ ')' <argument-expression-list>?
+        | $<dot> = '.' <identifier>
+        | $<arrow> = '->' <identifier>
+        | $<inc> = '++'
+        | $<dec> = '--'
+    }
+    rule argument-expression-list {
+        <assignment-expression>+ % ','
+    }
+    rule unary-expression {
+        <prefix>* [
+            | <postfix-expression>
+            | $<sizeof-t> = sizeof '(' ~ ')' <type-name>
+            | $<alignof> = _Alignof '(' ~ ')' <type-name>
+        ]
+    }
+    rule prefix {
+        | $<inc> = '++'
+        | $<dec> = '--'
+        | $<op> = <unary-operator>
+        | $<sizeof-e> = sizeof
+    }
+    token unary-operator { '&' | '*' | '+' | '-' | '~' | '!' }
+    rule cast-expression {
+        ['(' ~ ')' <type-name>]* <unary-expression>
+    }
+    rule multiplicative-expression {
+        <cast-expression>+ % [ $<op> = '*' | '/' | '%' ]
+    }
+    rule additive-expression {
+        <multiplicative-expression>+ % [ $<op> = '+' | '-' ]
+    }
+    rule shift-expression {
+        <additive-expression>+ % [ $<op> = '<<' | '>>' ]
+    }
+    rule relational-expression {
+        <shift-expression>+ % [ $<op> = '<' | '>' | '<=' | '>=' ]
+    }
+    rule equality-expression {
+        <relational-expression>+ % [ $<op> = '==' | '!=' ]
+    }
+    rule and-expression {
+        <equality-expression>+ % '&'
+    }
+    rule exclusive-or-expression {
+        <and-expression>+ % '^'
+    }
+    rule inclusive-or-expression {
+        <exclusive-or-expression>+ % '|'
+    }
+    rule logical-and-expression {
+        <inclusive-or-expression>+ % '&&'
+    }
+    rule logical-or-expression {
+        <logical-and-expression>+ % '||'
+    }
+    rule conditional-expression {
+        [<logical-or-expression> '?' <expression> ':']* <logical-or-expression>
+    }
+    rule assignment-expression {
+        [<unary-expression> <assignment-operator>]* <conditional-expression>
+    }
+    rule assignment-operator {
+        '=' | '*=' | '/=' | '%=' | '+=' | '-=' | '<<=' | '>>=' | '&=' | '^=' | '|='
+    }
+    rule expression {
+        <assignment-expression>+ % ','
+    }
+    rule constant-expression { <conditional-expression> }
+
+ ##### Declarations #####
+    rule declaration {
+        | <declaration-specifiers> <init-declarator-list> ';'
+        | <static_assert-declaration>
+    }
+    rule declaration-specifiers {
+        [
+        | <storage-class-specifier>
+        | <type-specifier>
+        | <type-qualifier>
+        | <function-specifier>
+        | <alignment-specifier>
+        ]*
+    }
+    rule init-declarator-list {
+        <init-declarator>+ % ','
+    }
+    rule init-declarator {
+        <declarator> ['=' <initializer>]?
+    }
+    rule storage-class-specifier {
+        typedef | extern | static | _Thread_local | auto | register
+    }
+    rule type-specifier {
+        | void | char | short | int | long | float | double
+        | signed | unsigned | _Bool | _Complex
+        | <atomic-type-specifier>
+        | <struct-or-union-specifier>
+        | <enum-specifier>
+        | <typedef-name>
+    }
+    rule struct-or-union-specifier {
+        | <struct-or-union> <identifier>? '{' ~ '}' <struct-declaration-list>
+        | <struct-or-union> <identifier>
+    }
+    rule struct-or-union { struct | union }
+     # The spec indicates a + here instead of a * here, but I think that's incorrect
+    rule struct-declaration-list { <struct-declaration>* }
+    rule struct-declaration {
+        | <specifier-qualifier-list> <struct-declarator-list>? ';'
+        | <static_assert-declaration>
+    }
+    rule specifier-qualifier-list {
+        [<type-specifier>|<type-qualifier>] <specifier-qualifier-list>?
+    }
+    rule struct-declarator-list {
+        <struct-declarator>+ % ','
+    }
+    rule struct-declarator {
+        <declarator> | <declarator>? ':' <constant-expression>
+    }
+    rule enum-specifier {
+        | enum <identifier>? '{' ~ '}' [<enumerator-list> ','?]
+        | enum <identifier>
+    }
+    rule enumerator-list {
+        <enumerator>+ % ','
+    }
+    rule enumerator {
+        <enumeration-constant> ['=' <constant-expression>]?
+    }
+    rule atomic-type-specifier {
+        _Atomic '(' ~ ')' <type-name>
+    }
+    rule type-qualifier {
+        const | restrict | volatile | _Atomic
+    }
+    rule function-specifier {
+        inline | _Noreturn
+    }
+    rule alignment-specifier {
+        _Alignas '(' ~ ')' [<type-name>|<constant-expression>]
+    }
+    rule declarator { <pointer>? <direct-declarator> }
+    rule direct-declarator {
+        [ <identifier>
+        | '(' ~ ')' <declarator>
+        ] <direct-declarator-postfix>*
+    }
+    rule direct-declarator-postfix {
+        | $<array> = '[' ~ ']'
+            ['static'? <type-qualifier-list>? 'static'? <assignment-expression>? | <type-qualifier-list>? '*']
+        | $<function> = '(' ~ ')' [<parameter-type-list>|<identifier-list>]?
+    }
+    rule pointer {
+        '*' <type-qualifier-list>? <pointer>?
+    }
+    rule type-qualifier-list { <type-qualifier>+ }
+    rule parameter-type-list { <parameter-list> [',' '...']? }
+    rule parameter-list { <parameter-declaration>+ % ',' }
+    rule parameter-declaration {
+        <declaration-specifiers> [<declarator>|<abstract-declarator>]?
+    }
+    rule identifier-list {
+        <identifier>+ % ','
+    }
+    rule type-name {
+        <specifier-qualifier-list> <abstract-declarator>?
+    }
+    rule abstract-declarator {
+        <pointer> | <pointer>? <direct-abstract-declarator>
+    }
+    rule direct-abstract-declarator {
+        [ '(' ~ ')' <abstract-declarator> ] <direct-abstract-declarator-postfix>*
+    }
+    rule direct-abstract-declarator-postfix {
+        | $<array> = '[' ~ ']'
+            ['static'? <type-qualifier-list>? 'static'? <assignment-expression>? | <type-qualifier-list>? '*']
+        | $<function> = '(' ~ ')' <parameter-type-list>?
+    }
+     # TODO: recognize only previously-declared typedef names
+    rule typedef-name { <!> }
+    rule initializer {
+        | <assignment-expression>
+        | '{' ~ '}' [<initializer-list> ','?]
+    }
+    rule initializer-list { [<designation>? <initializer>]+ % ',' }
+    rule designation { <designator>+ '=' }
+    rule designator {
+        | '[' ~ ']' <constant-expression>
+        | '.' <identifier>
+    }
+    rule static_assert-declaration {
+        _Static_assert '(' ~ ')' [<constant-expression> ',' <string-literal>] ';'
+    }
+
+ ##### Statements #####
+    rule statement {
+        | <labeled-statement>
+        | <compound-statement>
+        | <expression-statement>
+        | <selection-statement>
+        | <iteration-statement>
+        | <jump-statement>
+    }
+    rule labeled-statement {
+        | <identifier> ':' <statement>
+        | $<case> = case <constant-expression> ':' <statement>
+        | $<default> = default ':' <statement>
+    }
+    rule compound-statement { '{' ~ '}' <block-item>* }
+    rule block-item { <declaration> | <statement> }
+    rule expression-statement { <expression>? ';' }
+    rule selection-statement {
+        | $<if> = if '(' ~ ')' <expression> <statement> [else <statement>]?
+        | $<switch> = switch '(' ~ ')' <statement>
+    }
+    rule iteration-statement {
+        | $<while> = while '(' ~ ')' <expression> <statement>
+        | $<do-while> = do <statement> while '(' ~ ')' <expression>
+        | $<for> = for '(' ~ ')' [
+            [$<pre> = [<expression> | <declaration>]]? ';'
+            [$<check> = <expression>]? ';'
+            [$<iterate> = <expression>]?
+        ]
+    }
+    rule jump-statement {
+        | $<goto> = goto <identifier> ';'
+        | $<continue> = continue ';'
+        | $<break> = break ';'
+        | $<return> = return <expression>? ';'
+    }
+
+ ##### External definitions #####
+    rule translation-unit { <external-declaration>+ }
+    rule external-declaration { <function-definition> | <declaration> }
+    rule function-definition {
+        <declaration-specifiers> <declarator> <declaration>* <compound-statement>
+    }
+ 
+ ##### Extensions
+
+    rule attribute { __attribute__ '((' ~ '))' .*? }
+
+    token TOP { <translation-unit> }
 }
 
-sub call_only_once {
-	state $already_called;
-	$already_called and die "Multiple calls to Link::C are not supported at this time, sorry.\nPlease put all your arguments in one call.\n";
-	$already_called = 1;
-}
-
-sub resolve_header($f is rw) {
-	for @HEADER_DIRS -> $d {
-		if "$d/$f" ~~ :e {
-			return $f = "$d/$f";
-		}
-	}  # none found
-	die "$f not found in any of " ~ (join ", ", @HEADER_DIRS) ~ "\n";
-}
-
-sub resolve_library($f is rw) {
-	for @LIBRARY_DIRS -> $d {
-		for @LIBRARY_EXTS -> $e {
-			if "$d/$f$e" ~~ :e {
-				return $f = "$d/$f$e";
-			}
-		}
-	}  # none found
-	die "None of "
-	  ~ (join ", ", map {"$f$_"}, @LIBRARY_EXTS)
-	  ~ " found in any of "
-	  ~ (join ", ", @LIBRARY_DIRS)
-	  ~ "\n";
-}
-
-sub check_newer($file is copy, *@others is copy) {
-	return False unless $file ~~ :e;
-	$file.=subst("'", "'\\''", :global);  # shell safety
-	@others.map: *.=subst("'", "'\\''", :global);
-	my $modtime = 'stat -c %Y';  # :M doesn't work
-	my $filemodtime = qqx"$modtime '$file'";
-	for @others {
-		return False if qqx"$modtime '$_'" > $filemodtime;
-	}
-	return True;
-}
-
-sub write_cache($caller, $linking_code is rw, :$verbose, :$quiet) {
-	  warn "Creating cache" if $verbose;
-	if my $CACHE = open "$caller.linkc-cache.pm", :w {
-		$CACHE.print($linking_code) or $quiet or warn "Could not write to cache: $!\n";
-		$CACHE.close or $quiet or warn "Could not close cache: $!\n";
-		  warn "Precompiling cache" if $verbose;
-		my $tmperr = '/tmp/linkc-compile-err-' ~ [~] ('a'..'z', 'A'..'Z', 0..9).pick(5, :replace);
-		run("perl6 --target=pir $caller.linkc-cache.pm > $caller.linkc-cache.pir 2> $tmperr");
-		if (slurp $tmperr) -> $err {
-			warn "Could not precompile cache: $err\n" unless $quiet;
-		}
-		else {
-			$linking_code = "use \"$caller.linkc-cache\"";
-		}
-		unlink $tmperr or $quiet or warn "Could not unlink $tmperr: $!\n";
-	}
-	else {
-		warn "Could not open $caller.linkc-cache.pm for writing: $!\nWill not cache linking code.\n" unless $quiet;
-	}
-}
-
-
-sub readh(*@files is copy, :$link, :$skip) {
-	my $readh = join "/", ((@*INC, "..").first({"$_/Link/C/readh.p5" ~~ :e}), "Link/C/readh.p5");
-	our %functions;
-	for @files {
-		.=subst("'", "'\\''");
-		$_ = "'$_'";
-	}
-	my $tmperr = "/tmp/linkc-readh-err-" ~ [~] ('a'..'z', 'A'..'Z', 0..9).pick(5, :replace);
-	my $result = qqx"perl '$readh' {@files} 2> $tmperr";
-	my $err = slurp $tmperr;
-	unlink $tmperr;
-	die $err if $err;
-
-	my @skip = $skip ~~ List ?? @($skip) !! $skip;
-	my @link = $link ~~ List ?? @($link) !! $link;
-
-	for $result.split("\n")  {
-		next when "";
-		my @r = .split(' : ');
-		next if @r[1] ~~ any(@skip);
-		if @r[1] ~~ any(@link) {
-			push (%functions{shift @r} //= []), [@r];
-		}
-	}
-}
-
-sub parrot_signature (*@types) {
-	[~] map {%PARROT_SIG_TRANS{$_}}, @types
-}
-
-sub gen_linking_code(:$import) {
-	our %functions;
-	[~]
-	gen_begin(),
-	%functions.keys.map({
-		my $lib = $_;
-		gen_library_load($lib),
-		%functions{$lib}.map(-> $_ {&gen_link_function(:$import, $_)})
-	})
-}
-
-sub gen_begin {
-	$TOP_DECL
-}
-
-sub gen_library_load($lib) {
-	repl($LOAD_LIB,
-		'[[LIB]]' => $lib
-	)
-}
-
-sub gen_link_function(:$import, @f is copy) {
-	my $name = shift @f;
-	return "" if @f.grep: {$_ !~~ %PARROT_SIG_TRANS};
-	my $ret = shift @f;
-	my $export;
-	repl($LINK_FUNCTION,
-		'[[NAME]]' => $name,
-		'[[ARGS]]' => (join ', ', map {"\$p$_"}, 1..@f),
-		'[[PARROT_SIG]]' => parrot_signature($ret, @f),
-	) ~ 
-	do {given $import {
-		"" when undef;
-		when Array {
-			$_[].first({$export = match_export($name, $_)})
-			 ?? repl($EXPORT_FUNCTION,
-					'[[NAME]]' => $name,
-					'[[EXPORT]]' => $export,
-			) !! ""
-		}
-		default {
-			($export = match_export($name, $_))
-			 ?? repl($EXPORT_FUNCTION,
-					'[[NAME]]' => $name,
-					'[[EXPORT]]' => $export,
-			) !! ""
-		}
-	}}
-}
-
-sub match_export($name, $match) {
-	if $match ~~ Pair {
-		$name.subst($match.key, $match.value) if $name ~~ $match.key;
-	}
-	else {
-		$name if $name ~~ $match;
-	}
-}
-
-sub repl (Str $s, *@pairs) {
-	my $r = $s;
-	for @pairs {
-		$r.=subst(.key, .value, :global);
-	}
-	$r;
-}
-
-
- # Maybe we should regularize the types some.
- # Parrot's NCI interface does not make a case for unsigned integers.
-constant %PARROT_SIG_TRANS = (
-	'v'     => 'v',
-	'v *'   => 'i',  # Yes we'll keep track.
-	'?c'    => 'c',
-	'?c *'  => 't',  # This is presumed to be a string.
-	'sc'    => 'c',
-	'sc *'  => 't',  # If it is not a string, parrot may segfault.
-	'uc'    => 'c',
-	'uc *'  => 't',
-	'si'    => 'i',
-	'si *'  => '3',
-	'ui'    => 'i',
-	'ui *'  => '3',
-	'ss'    => 's',
-	'ss *'  => '2',
-	'us'    => 's',
-	'us *'  => '2',
-	'sl'    => 'l',
-	'sl *'  => '4',
-	'ul'    => 'l',
-	'ul *'  => '4',
-	'f'     => 'f',
-	'd'     => 'd',
-);
-
-=begin notused
-constant %PERL_SIG_TRANS = (
-	'void'             => 'Void',
-	'char'             => 'int8',
-	'char *'           => 'buf8',
-	'signed char'      => 'int8',
-	'signed char *'    => 'buf8',
-	'unsigned char'    => 'uint8',
-	'unsigned char *'  => 'buf8',
-	'int'              => 'int',
-	'int *'            => 'int',
-	'signed'           => 'int',
-	'signed *'         => 'int',
-	'signed int'       => 'int',
-	'signed int *'     => 'int',
-	'unsigned'         => 'uint',
-	'unsigned *'       => 'uint',
-	'unsigned int'     => 'uint',
-	'unsigned int *'   => 'uint',
-	'short'            => 'int16',
-	'short *'          => 'int16',
-	'short int'        => 'int16',
-	'short int *'      => 'int16',
-	'signed short'     => 'int16',
-	'signed short *'   => 'int16',
-	'signed short int' => 'int16',
-	'signed short int *' => 'int16',
-	'unsigned short'   => 'uint16',
-	'unsigned short *' => 'uint16',
-	'unsigned short int' => 'uint16',
-	'unsigned short int *' => 'uint16',
-	'signed long'      => 'int32',
-	'signed long *'    => 'int32',
-	'signed long int'  => 'int32',
-	'signed long int *' => 'int32',
-	'unsigned long'    => 'int32',
-	'unsigned long *'  => 'int32',
-	'unsigned long int' => 'int32',
-	'unsigned long int *' => 'int32',
-	'float'            => 'num32',
-	'double'           => 'num64',
-);
-=end notused
-
-constant $TOP_DECL =
-Q/Q:PIR {
-	.local pmc lib
-	.local pmc func
-	.local string failstr
-	goto begin
-	error:
-		if failstr goto knownerror
-			$P0 = new 'Exception'
-			$P0 = "Library load failed.\n"
-			throw $P0
-		knownerror:
-			$P0 = new 'Exception'
-			$P0 = failstr
-			throw $P0
-	begin:
-};
-/;
-
-constant $LOAD_LIB =
-Q/Q:PIR {
-	lib = loadlib '[[LIB]]'
-	failstr = "Failed to load [[LIB]]\n"
-	unless lib goto error
-};
-/;
-
-constant $LINK_FUNCTION =
-Q/Q:PIR {
-	func = dlfunc lib, '[[NAME]]', '[[PARROT_SIG]]'
-	set_hll_global ['Link';'C';'NCI'], '$[[NAME]]', func
-};
-&C::[[NAME]] = sub [[NAME]] ([[ARGS]]) { $Link::C::NCI::[[NAME]]([[ARGS]]) }
-/;
-
-constant $EXPORT_FUNCTION =
-Q/our &[[EXPORT]] := &C::[[NAME]];
-/;
+say 0;
+say C-grammar.parse('int main () { return 0; }').gist;
