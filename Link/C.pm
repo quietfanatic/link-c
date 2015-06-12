@@ -18,8 +18,8 @@ grammar C-grammar {
 
  ##### Universal character names #####
     token universal-character-name {
-        | '\u' $<four> = <.xdigit> ** 4
-        | '\U' $<eight> = <.xdigit> ** 8
+        | '\u' $<four> = [<.xdigit> ** 4]
+        | '\U' $<eight> = [<.xdigit> ** 8]
     }
 
  ##### Constants #####
@@ -82,9 +82,9 @@ grammar C-grammar {
         | <escape-sequence>
     }
     token escape-sequence { '\\' [  # Factored the \ out, different from the spec
-        | $<simple-escape-sequence> = \' | '"' | '?' | '\\' | 'a' | 'b' | 'f' | 'n' | 'r' | 't' | 'v'
-        | $<octal-escape-sequence> = [0..7] ** 1..3
-        | $<hexadecimal-escape-sequence> = 'x' <xdigit>+
+        | $<simple-escape-sequence> = [\' | '"' | '?' | '\\' | 'a' | 'b' | 'f' | 'n' | 'r' | 't' | 'v']
+        | $<octal-escape-sequence> = [[0..7] ** 1..3]
+        | $<hexadecimal-escape-sequence> = ['x' <xdigit>+]
     ] }
 
  ##### String literals #####
@@ -109,14 +109,14 @@ grammar C-grammar {
     }
     rule postfix-expression {
         [ <primary-expression>
-        | $<list> = '(' ~ ')' <type-name> '{' ~ '}' [<initializer-list> ','?]
+        | $<list> = ['(' ~ ')' <type-name> '{' ~ '}' [<initializer-list> ','?]]
         ] <postfix>*
     }
     rule postfix {
-        | $<index> = '[' ~ ']' <expression>
-        | $<call> = '(' ~ ')' <argument-expression-list>?
-        | $<dot> = '.' <identifier>
-        | $<arrow> = '->' <identifier>
+        | $<index> = ['[' ~ ']' <expression>]
+        | $<call> = ['(' ~ ')' <argument-expression-list>?]
+        | $<dot> = ['.' <identifier>]
+        | $<arrow> = ['->' <identifier>]
         | $<inc> = '++'
         | $<dec> = '--'
     }
@@ -126,8 +126,8 @@ grammar C-grammar {
     rule unary-expression {
         <prefix>* [
             | <postfix-expression>
-            | $<sizeof-t> = sizeof '(' ~ ')' <type-name>
-            | $<alignof> = _Alignof '(' ~ ')' <type-name>
+            | $<sizeof-t> = [sizeof '(' ~ ')' <type-name>]
+            | $<alignof> = [_Alignof '(' ~ ')' <type-name>]
         ]
     }
     rule prefix {
@@ -196,6 +196,7 @@ grammar C-grammar {
         | <type-qualifier>
         | <function-specifier>
         | <alignment-specifier>
+        | <.attribute>
         ]*
     }
     rule init-declarator-list {
@@ -216,7 +217,7 @@ grammar C-grammar {
         | <typedef-name>
     }
     rule struct-or-union-specifier {
-        | <struct-or-union> <identifier>? '{' ~ '}' <struct-declaration-list>
+        | <struct-or-union> <.attribute>* <identifier>? '{' ~ '}' <struct-declaration-list> <.attribute>*
         | <struct-or-union> <identifier>
     }
     rule struct-or-union { struct | union }
@@ -243,7 +244,7 @@ grammar C-grammar {
         <enumerator>+ % ','
     }
     rule enumerator {
-        <enumeration-constant> ['=' <constant-expression>]?
+        <enumeration-constant> <.attribute>* ['=' <constant-expression>]?
     }
     rule atomic-type-specifier {
         _Atomic '(' ~ ')' <type-name>
@@ -257,16 +258,17 @@ grammar C-grammar {
     rule alignment-specifier {
         _Alignas '(' ~ ')' [<type-name>|<constant-expression>]
     }
-    rule declarator { <pointer>? <direct-declarator> }
+    rule declarator { <pointer>? <direct-declarator> <.attribute>* }
     rule direct-declarator {
         [ <identifier>
         | '(' ~ ')' <declarator>
         ] <direct-declarator-postfix>*
     }
     rule direct-declarator-postfix {
-        | $<array> = '[' ~ ']'
-            ['static'? <type-qualifier-list>? 'static'? <assignment-expression>? | <type-qualifier-list>? '*']
-        | $<function> = '(' ~ ')' [<parameter-type-list>|<identifier-list>]?
+        | $<array> = [
+            '[' ~ ']' ['static'? <type-qualifier-list>? 'static'? <assignment-expression>? | <type-qualifier-list>? '*']
+        ]
+        | $<function> = ['(' ~ ')' [<parameter-type-list>|<identifier-list>]?]
     }
     rule pointer {
         '*' <type-qualifier-list>? <pointer>?
@@ -290,8 +292,9 @@ grammar C-grammar {
         [ '(' ~ ')' <abstract-declarator> ] <direct-abstract-declarator-postfix>*
     }
     rule direct-abstract-declarator-postfix {
-        | $<array> = '[' ~ ']'
-            ['static'? <type-qualifier-list>? 'static'? <assignment-expression>? | <type-qualifier-list>? '*']
+        | $<array> = [
+            '[' ~ ']' ['static'? <type-qualifier-list>? 'static'? <assignment-expression>? | <type-qualifier-list>? '*']
+        ]
         | $<function> = '(' ~ ')' <parameter-type-list>?
     }
      # TODO: recognize only previously-declared typedef names
@@ -320,7 +323,7 @@ grammar C-grammar {
         | <jump-statement>
     }
     rule labeled-statement {
-        | <identifier> ':' <statement>
+        | <identifier> ':' <.attribute>* <statement>
         | $<case> = case <constant-expression> ':' <statement>
         | $<default> = default ':' <statement>
     }
@@ -353,13 +356,37 @@ grammar C-grammar {
     rule function-definition {
         <declaration-specifiers> <declarator> <declaration>* <compound-statement>
     }
- 
- ##### Extensions
 
-    rule attribute { __attribute__ '((' ~ '))' .*? }
+ ##### Extensions #####
 
-    token TOP { <translation-unit> }
+     # Ignore preprocessor declarations
+    token ws { <!ww> [\s | '#' \N* \n]* }
+
+    rule attribute { __attribute__ '((' ~ '))' <.attribute_contents> }
+    token attribute_contents { ['(' ~ ')' <.attribute_contents> | <-[()]>]* }
+
+    rule TOP { ^ <translation-unit> $ }
+
+=begin asdf
+ ##### Actions #####
+    class Actions {
+         # External definitions
+        method translation-unit ($/) {
+            my %r;
+            %r.push: $_ for $<external-declaration>>>.made;
+            $/.make: %r;
+        }
+        method external-declaration ($/) {
+            $/make: $<function-definition> ?? function => $<function-definition>.made
+                                           !! declaration => $<declaration>.made;
+        }
+        method function-declaration ($/) {
+            my $
+        method TOP ($/) { $/.make: $<translation-unit>.made }
+    }
+=end asdf
+
 }
 
 say 0;
-say C-grammar.parse('int main () { return 0; }').gist;
+say C-grammar.parse(slurp).gist;
