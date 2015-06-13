@@ -1,12 +1,11 @@
 
 ##### Link::C will automatically link your C libraries for you. #####
 use v6;
+use NativeCall;
 unit module Link::C;
 
 ##### TODO: figure out where to get this information #####
-constant @HEADER_DIRS = <. /usr/include>, @*INC;
-constant @LIBRARY_DIRS = <. /lib /usr/lib>, @*INC;
-constant @LIBRARY_EXTS = '', <.so .so.0>;
+constant @HEADER_DIRS = infix:<,>(|<. /usr/include>, map { $0 if /^file'#'(.*)/ }, @*INC);
 
 class Declaration { ... }
 
@@ -14,6 +13,14 @@ class Type {
     has Bool $.const = False;
     has Bool $.volatile = False;
     has Bool $.restrict = False;
+    method gist-qualifiers (Str $s) {
+        return join ' ',
+            ('const' if $.const),
+            ('volatile' if $.volatile),
+            ('restrict' if $.restrict),
+            $s;
+    }
+    method p6-type () { die "No equivalent type yet defined to $.gist"; }
 }
 
 enum Width <
@@ -27,7 +34,7 @@ enum Width <
 class Type::Integer is Type {
     has Width $.width = signed-int;
     multi method gist (Type::Integer:D:) {
-        given $.width {
+        self.gist-qualifiers((given $.width {
             when char { 'char' }
             when unsigned-char { 'unsigned char' }
             when signed-char { 'signed char' }
@@ -39,38 +46,55 @@ class Type::Integer is Type {
             when signed-long { 'long' }
             when unsigned-long-long { 'unsigned long long' }
             when signed-long-long { 'long long' }
+        }))
+    }
+    method p6-type () {
+         # TODO: proper machine widths
+        given $.width {
+            when char { uint8 }  # Not really sure
+            when unsigned-char { uint8 }
+            when signed-char { int8 }
+            when unsigned-short { uint16 }
+            when signed-short { int16 }
+            when unsigned-int { uint32 }
+            when signed-int { int32 }
+            when unsigned-long { uint64 }
+            when signed-long { int64 }
+            when unsigned-long-long { uint64 }
+            when signed-long-long { int64 }
         }
     }
 }
 class Type::Struct is Type {
     has Str $.name;
-    multi method gist (Type::Struct:D:) { "struct $.name" }
+    multi method gist (Type::Struct:D:) { self.gist-qualifiers("struct $.name") }
 }
 class Type::Union is Type {
     has Str $.name;
-    multi method gist (Type::Union:D:) { "union $.name" }
+    multi method gist (Type::Union:D:) { self.gist-qualifiers("union $.name") }
 }
 class Type::Typedef is Type {
     has Str $.name;
-    multi method gist (Type::Typedef:D:) { "$.name (AKA <typedef lookup NYI>)" }
+    multi method gist (Type::Typedef:D:) { self.gist-qualifiers("$.name (AKA <typedef lookup NYI>)") }
 }
 class Type::Pointer is Type {
     has Type $.base;
-    multi method gist (Type::Typedef:D:) { '*' ~ $.base.gist }
+    multi method gist (Type::Pointer:D:) { self.gist-qualifiers($.base.gist ~ '*') }
+    method p6-type () { Pointer }
 }
 class Type::Array is Type {
     has Type $.base;
     has uint $.size;
-    multi method gist (Type::Typedef:D:) { $.base.gist ~ "[$.size]" }
+    multi method gist (Type::Array:D:) { self.gist-qualifiers($.base.gist ~ "[$.size]") }
 }
 class Type::Function is Type {
     has Type $.base;
     has Declaration @.parameters;  # Ignoring parameter names
     has Bool $.variadic = False;  # Not really sure what to do with this
     multi method gist (Type::Function:D:) {
-        $.base.gist ~ '(' ~
+        self.gist-qualifiers($.base.gist ~ '(' ~
             (@.parameters.map(*.gist), ('...' if $.variadic)).join(', ')
-        ~ ')'
+        ~ ')')
     }
 }
 
@@ -107,7 +131,7 @@ sub build-base-type (@words) {
 sub wrap-type (Type $base, @wrappers) {
      # Work around bug where reduce returns a list if given one item
     if @wrappers == 0 { return $base }
-    reduce { say $^wrapper.WHAT; $^wrapper.clone(:$^base) }, $base, |@wrappers;
+    reduce { $^wrapper.clone(:$^base) }, $base, |@wrappers;
 }
 
 enum Storage <
@@ -532,9 +556,33 @@ grammar C-grammar {
     rule TOP { ^ <translation-unit> $ { $/.make: $<translation-unit>.made } }
 }
 
-say '0=====';
-my $match = C-grammar.parse(slurp);
-say $match;
-say '1=====';
-say $match.made;
-say '2=====';
+sub link ($header is copy, $lib, *%opts) is export {
+    if $header !~~ /^\// {
+        my $found = False;
+            for @HEADER_DIRS -> $d {
+            say "Searching for $d/$header...";
+            if "$d/$header".IO.e {
+                $header = "$d/$header";
+                $found = True;
+            }
+        }
+        $found or die "Could not find $header in any of <{join ' ', @HEADER_DIRS}>";
+    }
+    my $esc_ = $header.subst("'", "'\\''", :g);
+    my $text = qqx/cpp '$esc_'/;
+    my @decls = C-grammar.parse($text).made;
+    for @decls {
+        if (.type ~~ Type::Function) {
+            my $return = .map: *.type.base.p6-type.^name;
+            my @params = .type.parameters.map: *.type.p6-type.^name;
+            my $s = "
+                &C::$_.name() = sub $_.name() ({join ', ', @params}) returns $return is native('$lib') \{ * }
+            ";
+            say $s;
+            EVAL $s;
+        }
+    }
+}
+
+link |@*ARGS;
+say C::timestwo(54);
