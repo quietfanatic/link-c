@@ -1,0 +1,10 @@
+{
+    "name" : "Link::C",
+    "description" : "Use C libraries in Perl 6 with no boilerplate.",
+    "author" : "quietfanatic",
+    "version" : "*",
+    "provides" : {
+        "Link::C" : "lib/Link/C.pm"
+    },
+    "depends" : [ ]
+}
