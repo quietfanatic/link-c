@@ -1,0 +1,3 @@
+
+int timestwo (int x);
+
